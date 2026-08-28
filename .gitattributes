@@ -16,3 +16,9 @@ blackbox/*.bag filter=lfs diff=lfs merge=lfs -text
 # A Windows checkout turns b9df7724... into 3ce5436b... - the follower then
 # refuses to start on a mask SHA-256 mismatch, exactly as the .pgm case did.
 *.yaml -text
+# Every one of these runs on the NUC and nowhere else. bash rejects a CRLF
+# script outright - "syntax error near unexpected token `$'{'" on the
+# first function - so a tree that reached the chair through a Windows
+# checkout, a git archive or an rsync cannot bring the stack up at all.
+# The blobs are already LF; this stops any of those paths changing that.
+*.sh text eol=lf
