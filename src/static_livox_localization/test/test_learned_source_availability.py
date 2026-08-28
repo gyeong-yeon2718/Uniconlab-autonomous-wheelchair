@@ -102,12 +102,17 @@ def test_the_legacy_profile_cannot_be_stopped_by_a_stale_detector():
     REQUIRE_LEARNED follows it to false and this failure cannot reach the
     wheels at all. Pinned because the two settings are set in different
     places and only their combination is safe."""
-    launcher = (PACKAGE.parents[1] / "tools"
-                / "start_hybrid_avoidance.sh").read_text(encoding="utf-8")
-    legacy = launcher[launcher.index("legacy_geometric)"):]
+    tools = PACKAGE.parents[1] / "tools"
+    profile = (tools / "perception_profile.sh").read_text(encoding="utf-8")
+    legacy = profile[profile.index("legacy_geometric)"):]
     legacy = legacy[:legacy.index(";;")]
     assert ': "${START_POINTPILLARS:=false}"' in legacy
-    assert 'REQUIRE_LEARNED="$START_POINTPILLARS"' in launcher
+    # And REQUIRE_LEARNED follows it on BOTH paths, or the bring-up starts
+    # without the detector and the drive is refused for its absence.
+    for name in ("start_hybrid_avoidance.sh", "go_hybrid.sh"):
+        text = (tools / name).read_text(encoding="utf-8")
+        assert 'REQUIRE_LEARNED="$START_POINTPILLARS"' in text, name
+        assert '. "$SCRIPT_DIR/perception_profile.sh"' in text, name
 
 
 @pytest.mark.parametrize("learned_stamp,expected", [
