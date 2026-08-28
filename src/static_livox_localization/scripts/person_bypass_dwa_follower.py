@@ -25,12 +25,13 @@ from gpu_dwa_backend import GpuRequiredError, install_gpu_planner
 # Install before DwaFollower constructs dwa_core.DwaPlanner. Environment and
 # ROS params still choose CuPy or the diagnostic CPU path.
 install_gpu_planner(dwa_core)
-from cluster_guard import GO_ROUND  # noqa: E402
+from cluster_guard import PERSON_BYPASS  # noqa: E402
 from dwa_follower import DwaFollower  # noqa: E402
 from person_bypass_policy import (  # noqa: E402
     StaticPersonQualifier,
     person_observations,
 )
+from waypoint_follower import PERSON_BYPASS_CONFIRM_S  # noqa: E402
 
 
 class PersonBypassDwaFollower(DwaFollower):
@@ -38,8 +39,11 @@ class PersonBypassDwaFollower(DwaFollower):
 
     def __init__(self):
         super(PersonBypassDwaFollower, self).__init__()
+        # Defaults to the follower's own window so the permit and the drive
+        # decision cannot be authorized by two different clocks. Overridable
+        # for bag replay, never to make the permit the earlier of the two.
         self.person_bypass_confirmation_s = float(rospy.get_param(
-            "~person_bypass_confirmation_s", 3.0))
+            "~person_bypass_confirmation_s", PERSON_BYPASS_CONFIRM_S))
         self.person_bypass_maximum_gap_s = float(rospy.get_param(
             "~person_bypass_maximum_gap_s", 0.35))
         self.person_bypass_position_jump_m = float(rospy.get_param(
@@ -108,6 +112,23 @@ class PersonBypassDwaFollower(DwaFollower):
             observations, now.to_sec(), self.tracking_state == "TRACKING")
 
     def avoidance_for(self, now, threat, blocking):
+        """Publish the gate permit; leave the driving decision to the base.
+
+        This class used to make its own decision as well: on an active permit
+        it returned GO_ROUND and reassigned ``dwa_core.OBSTACLE_FLOOR_M``, a
+        module global, from inside a control cycle. That predates the base
+        follower having a PERSON_BYPASS decision of its own. Keeping both left
+        two authorities answering one question with two clocks - this node's
+        3.0 s qualifier and the follower's PERSON_BYPASS_CONFIRM_S - and a
+        clearance that leaked into every later cycle through a global whose
+        restore lived in a `finally` in another method.
+
+        One decision now. The base decides whether the chair may pass, using
+        geometry it has; this decides whether the two GATES may be asked to
+        allow the arc that decision produces, using direct same-track
+        evidence. Both must agree before anything moves, and neither can be
+        inferred from the other.
+        """
         ordinary = super(PersonBypassDwaFollower, self).avoidance_for(
             now, threat, blocking)
         if threat is None or not threat.is_person:
@@ -118,31 +139,21 @@ class PersonBypassDwaFollower(DwaFollower):
 
         permit = self.observed_person_permit(now)
         self.publish_permit(permit)
-        if not permit.active:
+        if not permit.active or ordinary != PERSON_BYPASS:
             return ordinary
 
-        # DWA-only authorization. The semantic and raw trajectory gates both
-        # consume the same short-lived permit; neither can infer authorization
-        # from a class label or from this return value alone.
-        self.planner.max_speed = min(
-            float(self.planner.max_speed), float(permit.max_speed_mps))
-        dwa_core.OBSTACLE_FLOOR_M = max(
-            float(dwa_core.OBSTACLE_FLOOR_M),
-            float(permit.min_clearance_m))
-
-        # The base GATE_STALL diagnostic is for an obstacle absent from planner
-        # geometry. This person is present in geometry and the trajectory
-        # gate is now the authority, so the old fixed-corridor reason must not
-        # pre-empt the DWA cycle before a curved proposal exists.
+        # The base has authorized the pass and the permit is live, so the raw
+        # gate is about to be asked to allow a curved arc round a body that IS
+        # in planner geometry. GATE_STALL is the diagnostic for an obstacle
+        # that is NOT, and firing it here would stop the cycle before a curved
+        # proposal exists - which is the deadlock it was written to report.
         self.gate_reason = ""
         self.gate_blocked_since = None
         self.gate_detail = "static-person trajectory permit"
-        return GO_ROUND
+        return ordinary
 
     def step(self):
         self._permit_published_this_cycle = False
-        saved_max_speed = float(self.planner.max_speed)
-        saved_clearance = float(dwa_core.OBSTACLE_FLOOR_M)
         now = rospy.Time.now()
         # Publish a continuously refreshed qualification heartbeat before the
         # base hold ladder can return for PAUSED/MANUAL/STARTUP. This does not
@@ -152,8 +163,6 @@ class PersonBypassDwaFollower(DwaFollower):
         try:
             super(PersonBypassDwaFollower, self).step()
         finally:
-            self.planner.max_speed = saved_max_speed
-            dwa_core.OBSTACLE_FLOOR_M = saved_clearance
             if not self._permit_published_this_cycle:
                 if self.tracking_state != "TRACKING":
                     self.qualifier.reset()

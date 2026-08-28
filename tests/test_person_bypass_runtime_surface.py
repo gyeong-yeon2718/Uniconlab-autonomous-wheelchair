@@ -42,9 +42,15 @@ def test_dwa_keeps_rtx_qualifies_while_paused_and_publishes_short_permit():
     assert '"/person_bypass/permit"' in follower
     assert "StaticPersonQualifier" in follower
     assert "self.tracking_state == \"TRACKING\"" in follower
-    assert "self.planner.max_speed" in follower
-    assert "dwa_core.OBSTACLE_FLOOR_M" in follower
-    assert "return GO_ROUND" in follower
+    # One decision, not two. This node used to answer the driving question
+    # itself - return GO_ROUND, and reassign dwa_core.OBSTACLE_FLOOR_M, a
+    # module global, from inside a control cycle - while the base follower
+    # answered the same question with its own clock. It now only decides
+    # whether the GATES may be asked, and defers the rest.
+    assert "self.planner.max_speed = min(" not in follower
+    assert "dwa_core.OBSTACLE_FLOOR_M =" not in follower
+    assert "return GO_ROUND" not in follower
+    assert "ordinary != PERSON_BYPASS" in follower
     # Permit qualification happens before the inherited hold ladder can
     # return for PAUSED, otherwise a person already in front makes `go`
     # impossible forever.
