@@ -11,3 +11,8 @@ blackbox/*.bag filter=lfs diff=lfs merge=lfs -text
 # Route assets are hashed byte-for-byte after stripping only a trailing
 # newline, so they must not be line-ending converted either.
 *.json -text
+# The mask YAML is hashed the same way and into the same route identity
+# (drivable_mask_yaml_sha256), and it was left out of the 2026-08-15 fix.
+# A Windows checkout turns b9df7724... into 3ce5436b... - the follower then
+# refuses to start on a mask SHA-256 mismatch, exactly as the .pgm case did.
+*.yaml -text
