@@ -42,8 +42,26 @@ def test_the_default_profile_is_the_detector_the_chair_drove_on():
     assert 'PERCEPTION_PROFILE="${PERCEPTION_PROFILE:-legacy_geometric}"' \
         in text
     legacy = profile_block("legacy_geometric")
-    assert ': "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=true}"' in legacy
     assert ': "${START_POINTPILLARS:=false}"' in legacy
+
+
+def test_the_producer_is_never_blinded_to_what_the_gate_can_veto():
+    """safety_gate has no fixed-map subtraction and cannot get one: it works
+    on raw returns in a height band with no idea what anything is. Turning
+    subtraction on for the cluster producer alone does not remove a mapped
+    wall from the chair's world, only from the follower's half of it, and
+    the gate goes on sweeping into it.
+
+    Measured on the 2026-08-28 16:11 drive with subtraction on: the follower
+    saw two objects, both outside the band; the gate held 9,838 obstacle
+    points, zone_points 0, and refused OBSTACLE_SWEEP on 17 of 20 samples.
+    The chair reached waypoint 42 and stopped there.
+
+    Neither profile may ship with it on. It stays a parameter for bag replay,
+    where nothing is driving.
+    """
+    for name in ("legacy_geometric", "hybrid_experimental"):
+        assert ': "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"' in             profile_block(name), name
 
 
 def test_the_legacy_profile_restores_the_field_tested_thresholds():
@@ -60,7 +78,6 @@ def test_the_2026_08_27_graph_is_still_reachable_by_name():
     the counts above, and the reason the subtraction was turned off - a
     person against a mapped wall - has not stopped being real."""
     experimental = profile_block("hybrid_experimental")
-    assert ': "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"' in experimental
     assert ': "${START_POINTPILLARS:=true}"' in experimental
     assert ': "${GEOMETRIC_MIN_CELL_POINTS:=1}"' in experimental
     assert ': "${GEOMETRIC_MIN_CLUSTER_POINTS:=5}"' in experimental

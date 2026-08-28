@@ -73,7 +73,29 @@ PERCEPTION_PROFILE="${PERCEPTION_PROFILE:-legacy_geometric}"
 case "$PERCEPTION_PROFILE" in
   legacy_geometric)
     : "${START_POINTPILLARS:=false}"
-    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=true}"
+    # Subtraction stays OFF here, and that is not the 2026-08-27 setting
+    # returning by accident.
+    #
+    # safety_gate has never had fixed-map subtraction: it works on raw
+    # returns inside a height band and cannot tell a mapped wall from a
+    # person. Subtracting the map for the CLUSTER producer therefore does
+    # not remove that wall from the chair's world - it removes it from the
+    # follower's half of it, while the gate goes on sweeping into it. The
+    # follower then reports a clear corridor, proposes an arc, and the gate
+    # refuses; GATE_STALL is the named diagnostic for exactly that split.
+    #
+    # Measured on the 2026-08-28 16:11 drive with subtraction ON: the
+    # follower saw two objects, both outside the band, while the gate held
+    # 9,838 obstacle points and refused OBSTACLE_SWEEP on 17 of 20 samples
+    # with zone_points 0 - nothing straight ahead, the swept arc into the
+    # wall the follower had been denied. The chair reached wp 42 and stopped.
+    #
+    # The object inflation this profile exists to undo had two causes and
+    # the thresholds below are the one that can be fixed without blinding
+    # half the stack: 1/5/80 splits one object into several. Until the gate
+    # and the producer share a world, the planner has to see what can veto
+    # it - which is the same rule the swept-rectangle work rests on.
+    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"
     # obstacle_clusters' own field-tested thresholds. The experimental
     # profile halves them, which is what turns one object into several.
     : "${GEOMETRIC_MIN_CELL_POINTS:=2}"
