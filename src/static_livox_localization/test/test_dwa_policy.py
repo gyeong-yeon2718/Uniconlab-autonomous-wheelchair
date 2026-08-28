@@ -389,8 +389,11 @@ def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
     assert approach["speed_cap"] <= cg.PERSON_BYPASS_SPEED_MPS
     assert follower.avoidance_state == cg.APPROACH, (
         "an approach must be distinguishable from an authorized pass")
-    assert published[-1].startswith("DWA:APPROACH"), (
-        "the operator cannot see where a ten-second approach began")
+    assert published[-1].startswith("DRIVING wp="), (
+        "an approach is driving, and the app only knows DRIVING/BYPASS/"
+        "RECOVER as driving states")
+    assert " approach" in published[-1], (
+        "the operator cannot see where the approach began")
 
     follower.cluster_summary = summary_at(at_window(), [person])
     follower.step()
@@ -940,3 +943,33 @@ def test_the_window_these_timings_assume_is_the_real_one():
     survived in the first place."""
     module, _stamp = load_follower("waypoint_follower")
     assert WINDOW_S == module.PERSON_BYPASS_CONFIRM_S
+
+
+def test_the_published_state_word_is_one_the_operator_app_knows(monkeypatch):
+    """MainActivity.isDrivingState() accepts DRIVING, BYPASS and RECOVER.
+
+    This profile published "DWA", which is none of them, so the app filed a
+    normally driving chair as "hold reason: DWA" and only looked right when
+    the measured speed crossed its moving threshold. The pursuit profile has
+    always published the app's words; this one now does too, and what it is
+    doing beyond driving goes in the trailing detail.
+    """
+    app_driving_states = ("DRIVING", "BYPASS", "RECOVER")
+    person = walking(4.0)
+    person.update({"id": 77, "motion": ct.STATIC})
+    _module, follower, published, _commanded = dwa_with(
+        [person], monkeypatch, threat_distance_stop_radius=1.0)
+
+    seen = set()
+    for index in range(WINDOW_STEPS + 4):
+        follower.cluster_summary = summary_at(BASE_S + index * STEP_S,
+                                              [person])
+        follower.step()
+        word = published[-1].split()[0]
+        if not word.startswith("HOLD"):
+            seen.add(word)
+
+    assert seen, "the follower never published a driving state"
+    assert seen <= set(app_driving_states), (
+        "published %s; the app treats anything else as a hold reason" % seen)
+    assert "BYPASS" in seen, "the authorized pass must read as BYPASS"

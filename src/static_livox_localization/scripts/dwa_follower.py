@@ -494,13 +494,22 @@ class DwaFollower(WaypointFollower):
         self.cmd_pub.publish(command)
         self.current_speed = speed
         self.last_yaw_rate = yaw_rate
+        # The state WORD is the pursuit profile's vocabulary - DRIVING,
+        # BYPASS, RECOVER - because that is what the operator app was built
+        # to read, and this profile has been publishing "DWA" into it. The
+        # app's isDrivingState() does not know that word, so it files a
+        # normally driving chair under "hold reason: DWA" and only recovers
+        # when the measured speed happens to exceed its moving threshold.
+        # Adding :APPROACH and :BYPASS to it would have made a pre-existing
+        # mismatch worse. What this profile is doing beyond driving goes in
+        # the trailing detail, which the bridge forwards whole.
+        going_round = self.avoidance_state == GO_ROUND
         self.publish_state(
-            "DWA%s wp=%d/%d v=%.2f w=%+.2f target %.2f/%+.2f%s" % (
-                "" if self.avoidance_state not in (APPROACH, GO_ROUND)
-                else (":APPROACH" if self.avoidance_state == APPROACH
-                      else ":BYPASS"),
+            "%s wp=%d/%d v=%.2f w=%+.2f target %.2f/%+.2f%s%s" % (
+                "BYPASS" if going_round else "DRIVING",
                 self.nearest_index, len(self.waypoints), speed, yaw_rate,
                 target_v, target_w,
+                " approach" if self.avoidance_state == APPROACH else "",
                 "" if self.policies else " POLICIES_OFF"),
             "DWA:OK" if self.avoidance_state not in (APPROACH, GO_ROUND)
             else "DWA:" + str(self.avoidance_state).upper())
