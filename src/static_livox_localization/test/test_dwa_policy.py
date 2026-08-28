@@ -41,6 +41,7 @@ def load(name):
 
 cg = load("cluster_guard")
 ct = load("cluster_tracking")
+ms = load("motion_safety")
 
 
 # ------------------------------------------------ the profile's own policy
@@ -282,7 +283,13 @@ def test_recorded_stationary_person_eventually_allows_safe_bypass(monkeypatch):
     assert len(follower.planner.calls) == 1
     assert follower.planner.calls[0]["obstacles"], \
         "the recorded stationary person never reached DWA geometry planning"
-    assert follower.planner.calls[0]["obstacle_floor_m"] == 0.80
+    # 0.80 m of berth, still. It reads as 0.35 because the planner
+    # stopped measuring from the chair centre on 2026-08-28: the floor
+    # is now room OUTSIDE the same padded rectangle safety_gate vetoes,
+    # and that rectangle already accounts for 0.45 m of it.
+    assert follower.planner.calls[0]["obstacle_floor_m"] == \
+        pytest.approx(0.80 - (ms.FOOTPRINT_HALF_WIDTH_M
+                              + ms.SWEEP_MARGIN_M))
     assert follower.planner.calls[0]["speed_cap"] <= 0.35
 
 
@@ -322,13 +329,28 @@ def test_committed_person_bypass_survives_lateral_arc(monkeypatch):
     assert len(lateral_calls) == 6
     assert all(call["obstacles"] for call in lateral_calls)
     assert all(
-        call["obstacle_floor_m"] == 0.80
+        call["obstacle_floor_m"] == cg.PERSON_BYPASS_CLEARANCE_M
         for call in lateral_calls
     )
 
 
 def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
         monkeypatch):
+    """The confirmation window is served while closing, not while stopped.
+
+    This used to assert the opposite - fifty cycles of HOLD:DWA_WAIT and a
+    planner never called - and that is what the 2026-08-28 drive cost. The
+    chair stopped where it first saw a parked person, spent the window
+    standing there, and was authorized at whatever range it had stopped at:
+    2.00, 2.03, 1.90 and 2.11 m on four of that night's five qualifying
+    tracks. The gate refused all four. The fifth was authorized at 5.46 m
+    and passed without a single refusal.
+
+    So the window is unchanged and the authorization is unchanged; only
+    where the chair spends the wait moves. It keeps closing at bypass speed,
+    with the person in the planner's geometry and the full bypass berth
+    required, so the arc it will need is being shaped the whole time.
+    """
     person = walking(4.0)
     person.update({"id": 1641, "motion": ct.STATIC})
     _module, follower, published, commanded = dwa_with(
@@ -339,15 +361,26 @@ def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
             100.0 + index * 0.2, [person])
         follower.step()
 
-    assert follower.planner.calls == []
-    assert published[-1] == "HOLD:DWA_WAIT"
-    assert commanded[-1] == "STOP"
+    assert not any(text.startswith("HOLD") for text in published), (
+        "the chair stopped to watch someone it had not yet had to stop for")
+    assert commanded[-1] != "STOP"
+    assert len(follower.planner.calls) == 50
+    approach = follower.planner.calls[-1]
+    assert approach["obstacles"], (
+        "the person was not in planner geometry during the approach")
+    assert approach["obstacle_floor_m"] == cg.PERSON_BYPASS_CLEARANCE_M
+    assert approach["speed_cap"] <= cg.PERSON_BYPASS_SPEED_MPS
+    assert follower.avoidance_state == cg.APPROACH, (
+        "an approach must be distinguishable from an authorized pass")
+    assert published[-1].startswith("DWA:APPROACH"), (
+        "the operator cannot see where a ten-second approach began")
 
     follower.cluster_summary = summary_at(110.0, [person])
     follower.step()
 
-    assert len(follower.planner.calls) == 1
-    assert follower.planner.calls[0]["obstacles"]
+    assert len(follower.planner.calls) == 51
+    assert follower.planner.calls[-1]["obstacles"]
+    assert follower.avoidance_state == cg.PERSON_BYPASS
 
 
 def test_one_static_frame_after_long_motion_does_not_authorize_bypass(
@@ -765,7 +798,8 @@ def test_both_replacement_profiles_ask_the_shared_policy(monkeypatch):
             assert "decision == WAIT" in text
             assert "GO_ROUND, PERSON_BYPASS" in text
         else:
-            assert "decision in (WAIT, PERSON_BYPASS)" in text
+            assert "decision in (APPROACH, WAIT, PERSON_BYPASS)" in text, \
+                "mpc must hold for an approach it cannot finish"
         assert "avoidance_decision(" not in text, \
             "%s must not re-implement the decision" % name
 

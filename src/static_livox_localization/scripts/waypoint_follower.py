@@ -71,7 +71,7 @@ from body_frame import (CHAIR_CENTRE_IN_BODY_XYZ, REFERENCE_BODY,
 from cluster_guard import (ACCUMULATION_S as CLUSTER_ACCUMULATION_S,
                            BYPASS_EDGE_KEEP_M, BYPASS_OFFSET_MAX_M,
                            BYPASS_OFFSET_MIN_M, BYPASS_OFFSETS,
-                           BYPASS_PROBE_AHEAD_M, GO_ROUND, Threat,
+                           APPROACH, BYPASS_PROBE_AHEAD_M, GO_ROUND, Threat,
                            PERSON_BYPASS, PERSON_LABEL,
                            avoidance_decision, bypass_offsets_for_room,
                            is_stale, matching_threats, nearest_threat,
@@ -1189,7 +1189,12 @@ class WaypointFollower:
 
         decision = self.avoidance_for(
             now, threat, self.threat_blocks(threat, guard_stop))
-        if decision == PERSON_BYPASS:
+        if decision in (APPROACH, PERSON_BYPASS):
+            # Neither is available to this profile. PERSON_BYPASS is the pass
+            # itself and needs the DWA rollout; APPROACH is the run-up to it
+            # and would otherwise fall through to take_a_way_round below,
+            # which is a lateral offset - a sidestep past a person taken on
+            # evidence that has not finished arriving.
             self.status_pub.publish(String(data="HOLD:PERSON_BYPASS_DWA_ONLY"))
             self.send_stop()
             return

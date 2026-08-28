@@ -92,9 +92,12 @@ PERSON_LABEL = "person"
 # operator's side and went for their feet. Model at least a 0.70 m standing
 # footprint, while believing any larger observation.
 PERSON_MIN_HALF_EXTENT_M = 0.35
-# The field repair for that clipping used 0.80 m from the inflated body and
-# the slowest speed at which the loaded chair can still turn.
-PERSON_BYPASS_CLEARANCE_M = 0.80
+# The field repair for that clipping used 0.80 m measured from the chair
+# CENTRE, back when the planner's obstacle test was a disc around that centre.
+# Since 2026-08-28 the planner clears the same padded rectangle safety_gate
+# vetoes, so the same physical berth is stated as room outside the chair:
+# 0.80 - (FOOTPRINT_HALF_WIDTH_M + SWEEP_MARGIN_M) = 0.80 - 0.45.
+PERSON_BYPASS_CLEARANCE_M = 0.35
 PERSON_BYPASS_SPEED_MPS = 0.35
 
 
@@ -481,6 +484,11 @@ def corridor_obstacle_points(summary, half_width_m, lateral_shift_m=0.0,
 
 GO_ROUND = "go_round"
 PERSON_BYPASS = "person_bypass"
+# Keep closing on something parked while the evidence for passing it is still
+# being gathered. Not an authorization: the caller plans with the object in
+# its geometry and at bypass speed, and may not offset, claim the gate permit
+# or leave the band. See avoidance_decision.
+APPROACH = "approach"
 WAIT = "wait"
 CLEAR = "clear"
 
@@ -504,6 +512,20 @@ def avoidance_decision(threat, blocking, blocked_for_s, plan_ahead_m,
     with current geometry and hard-mask rollout checks can execute it.
     Standing still for the tracker's CONFIRM_S alone is never enough.
 
+    APPROACH is what a parked person gets while that evidence is still being
+    gathered, and it is the whole 2026-08-28 finding. A parked OBJECT gets
+    GO_ROUND from PLAN_AHEAD_M - 8 m - and drifts past. A parked PERSON used
+    to get WAIT, which stops the chair; the evidence clock then ran while it
+    stood there, and authorization arrived at whatever range it had stopped
+    at. Measured over that night's six qualifying tracks: first seen at 7.5,
+    5.3, 3.0, 4.9 and 7.9 m, authorized at 2.0, 2.0, 1.9, 2.1 and 5.5 m. The
+    one authorized at 5.5 m was passed without the gate refusing once. Every
+    one authorized near 2 m was refused, and the 1.9 m case deadlocked for
+    ten seconds at maximum yaw. The manoeuvre was never infeasible; it was
+    being started from a range at which no arc could clear the body.
+    Serving the same wait while still closing costs no evidence and buys the
+    metres back. It is not permission to pass - only WAIT is replaced.
+
     blocked_for_s is the fallback for sources that carry no identity. A
     raw-scan return is UNKNOWN forever, so standing in the way is the only
     evidence of parkedness it can ever offer - but it never overrules a
@@ -513,7 +535,9 @@ def avoidance_decision(threat, blocking, blocked_for_s, plan_ahead_m,
         return CLEAR
     if threat.is_person:
         if threat.parked and threat.distance_m < plan_ahead_m:
-            return PERSON_BYPASS if person_bypass_ready else WAIT
+            if person_bypass_ready:
+                return PERSON_BYPASS
+            return WAIT if blocking else APPROACH
         return WAIT if blocking else CLEAR
     if threat.parked and threat.distance_m < plan_ahead_m:
         return GO_ROUND

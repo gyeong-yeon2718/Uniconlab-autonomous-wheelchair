@@ -82,7 +82,7 @@ from std_msgs.msg import String
 
 import dwa_core
 import mpc_speed
-from cluster_guard import (GO_ROUND, PERSON_BYPASS,
+from cluster_guard import (APPROACH, GO_ROUND, PERSON_BYPASS,
                            PERSON_BYPASS_CLEARANCE_M,
                            PERSON_BYPASS_SPEED_MPS, WAIT,
                            corridor_obstacle_points)
@@ -372,6 +372,11 @@ class DwaFollower(WaypointFollower):
             self.send_stop()
             self.last_command_stamp = None
             return
+        # Carried to the end of the cycle so the published state can say
+        # which of the two it is. dwa_status is the planner's own verdict and
+        # is overwritten by it; a ten-second approach that reads as ordinary
+        # tracking is how the 2026-08-28 logs hid where the manoeuvre began.
+        self.avoidance_state = decision
 
         # Past our own WAIT, so whatever the gate is holding, it is not
         # something the cluster producer gave us. Say so and stop asking.
@@ -395,13 +400,28 @@ class DwaFollower(WaypointFollower):
         if threat is not None:
             cap = approach_cap(cap, threat.distance_m, stop_m,
                                dwa_core.TURN_FLOOR_SPEED)
-        if decision == PERSON_BYPASS:
+        if decision in (PERSON_BYPASS, APPROACH):
+            # An approach is served at the speed the pass will be taken at.
+            # Arriving faster than that only buys a shorter look and a
+            # harder stop, and the gate's braking envelope grows with speed.
             cap = min(cap, PERSON_BYPASS_SPEED_MPS)
 
-        # Geometry only when going round it. Handing the planner an object it
-        # is not allowed to go round would let it sidestep anyway.
+        # Geometry when the decision is about a parked thing, which now
+        # includes the run-up. It stays withheld for anything MOVING: a
+        # rollout scorer handed a walking person picks the arc that clears
+        # them by the floor and drives past, which is the defect
+        # test_dwa_policy exists for and is not softened here.
+        #
+        # What changed on 2026-08-28 is APPROACH. The evidence window for
+        # passing a parked person used to be served under WAIT, and WAIT
+        # sends a stop before this line is reached - so for its whole length
+        # the planner was scoring arcs against an empty obstacle list, and
+        # the detour it would eventually need did not begin to exist until
+        # authorization landed. By then the person was ~2 m away. Now the
+        # object is in the geometry for the entire approach and only the
+        # authorization waits.
         obstacles = self.obstacle_points(state) if decision in (
-            GO_ROUND, PERSON_BYPASS) else ()
+            GO_ROUND, PERSON_BYPASS, APPROACH) else ()
         # Plan from where the chair will be when the command lands, not from
         # where it is. The gap was measured on 2026-08-11 by cross-correlating
         # commanded angular.z against the yaw rate differentiated from
@@ -417,7 +437,7 @@ class DwaFollower(WaypointFollower):
             last_speed=self.current_speed,
             obstacle_floor_m=(
                 PERSON_BYPASS_CLEARANCE_M
-                if decision == PERSON_BYPASS
+                if decision in (PERSON_BYPASS, APPROACH)
                 else dwa_core.OBSTACLE_FLOOR_M))
         if status != "OK":
             if status != self.dwa_status:
@@ -468,10 +488,15 @@ class DwaFollower(WaypointFollower):
         self.current_speed = speed
         self.last_yaw_rate = yaw_rate
         self.publish_state(
-            "DWA wp=%d/%d v=%.2f w=%+.2f target %.2f/%+.2f%s" % (
+            "DWA%s wp=%d/%d v=%.2f w=%+.2f target %.2f/%+.2f%s" % (
+                "" if self.avoidance_state not in (APPROACH, PERSON_BYPASS)
+                else (":APPROACH" if self.avoidance_state == APPROACH
+                      else ":PERSON_BYPASS"),
                 self.nearest_index, len(self.waypoints), speed, yaw_rate,
                 target_v, target_w,
-                "" if self.policies else " POLICIES_OFF"), "DWA:OK")
+                "" if self.policies else " POLICIES_OFF"),
+            "DWA:OK" if self.avoidance_state not in (APPROACH, PERSON_BYPASS)
+            else "DWA:" + str(self.avoidance_state).upper())
 
     def publish_state(self, text, state=None):
         """Publish every cycle, log only on a change of state.

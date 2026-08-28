@@ -242,9 +242,17 @@ def test_a_person_standing_still_is_waited_for_not_driven_around():
     CONFIRM_S is 1.5 s, so someone who stops to check a phone is STATIC,
     and STATIC is parked - which sent the chair around a stationary
     pedestrian from 8 m out without the blocked clock ever starting.
+
+    Still true, and APPROACH does not weaken it: neither answer here is
+    GO_ROUND or PERSON_BYPASS, so nothing may pass this person on the
+    tracker's word. What APPROACH changes is only whether the chair is
+    standing or still closing while it waits for the real authorization.
     """
-    assert decide(person(4.0, ct.STATIC), blocking=False) == cg.WAIT
+    assert decide(person(4.0, ct.STATIC), blocking=False) == cg.APPROACH
     assert decide(person(4.0, ct.STATIC)) == cg.WAIT
+    for blocking in (True, False):
+        assert decide(person(4.0, ct.STATIC), blocking=blocking) not in (
+            cg.GO_ROUND, cg.PERSON_BYPASS)
 
 
 def test_a_person_is_not_gone_around_by_the_time_rule_either():
@@ -266,15 +274,32 @@ def test_a_person_needs_explicit_static_bypass_authorization():
         person_bypass_ready=True) == cg.WAIT
 
 
-def test_a_static_person_is_stopped_and_watched_before_blocking():
+def test_a_static_person_is_watched_while_closing_not_while_stopped():
+    """Unauthorized is APPROACH out here, and WAIT once inside the stop
+    radius. Serving the wait at a standstill is what authorized four of the
+    2026-08-28 tracks at about 2 m, where the arc no longer fits."""
     assert decide(
         person(4.0, ct.STATIC),
         blocking=False,
+        person_bypass_ready=False) == cg.APPROACH
+    assert decide(
+        person(4.0, ct.STATIC),
+        blocking=True,
         person_bypass_ready=False) == cg.WAIT
     assert decide(
         person(4.0, ct.STATIC),
         blocking=False,
         person_bypass_ready=True) == cg.PERSON_BYPASS
+
+
+def test_approach_is_only_ever_offered_for_a_parked_person():
+    """A moving person is never approached with their geometry in hand -
+    that is the arc-around-a-walker defect, and it stays refused."""
+    for motion in (ct.MOVING, ct.UNKNOWN):
+        assert decide(person(4.0, motion), blocking=False) != cg.APPROACH
+        assert decide(person(4.0, motion), blocking=True) == cg.WAIT
+    # A parked OBJECT already had the early answer; it keeps it.
+    assert decide(threat(4.0, ct.STATIC), blocking=False) == cg.GO_ROUND
 
 
 def test_a_person_who_leaves_the_corridor_clears_it():
