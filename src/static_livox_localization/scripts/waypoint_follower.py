@@ -133,10 +133,27 @@ PERSON_MEMORY_S = 1.0
 # centimetres is wider than that envelope swing while still releasing a
 # person who actually clears the corridor or moves away.
 PERSON_STOP_RELEASE_MARGIN_M = 0.30
-# A tracked person is not a parked object after the producer's 1.5-second
-# STATIC confirmation. Bypass is a separate, longer authorization based on
-# direct same-track producer evidence; any missed 5 Hz frame resets it.
-PERSON_BYPASS_CONFIRM_S = 10.0
+# Not a parked object after the producer's 1.5-second STATIC confirmation.
+# Going round anything is a separate, longer authorization built from direct
+# same-track producer evidence; any missed 5 Hz frame resets it.
+#
+# 10.0 s until 2026-08-28, which perception on this route cannot deliver.
+# Measured over that drive, on uninterrupted runs of "same nearest track,
+# STATIC, inside PLAN_AHEAD_M": median 8 frames, p90 60, and exactly ONE run
+# in 71 reached the 200 frames a 10 s window needs. Replaying the drive with
+# 10.0 confirmed 4 of 36 encounters; with 3.0, 8 of 36.
+#
+# 3.0 is not a new number - it is what StaticPersonQualifier has been running
+# with on the NUC, and the one clean pass in that drive (track 1696,
+# authorized at 5.46 m, not one gate refusal) came from it. It also makes
+# this and the permit node agree, which they did not.
+#
+# What it is NOT is the thing that decides how far out the chair commits.
+# The sweep moved the median commit distance 2.31 m -> 2.28 m, because in a
+# REPLAY the chair's positions are fixed: where the recorded run stopped, the
+# object stays at that range however fast the clock runs. Commit distance
+# depends on the chair continuing to close, which only a live drive shows.
+PERSON_BYPASS_CONFIRM_S = 3.0
 PERSON_BYPASS_MAX_GAP_S = 0.35
 # The forward-cone and minimum-range constants that used to live here
 # belonged to the raw five-point scan check, removed 2026-08-05. The same

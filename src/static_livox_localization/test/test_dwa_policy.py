@@ -39,6 +39,23 @@ def load(name):
         sys.path.remove(str(SCRIPTS))
 
 
+# The evidence window, expressed once. These tests used to step 50 frames of
+# 0.2 s because the window was 10 s; written that way, a change to the
+# constant silently turns "just short of the window" into "well past it" and
+# every assertion about what has NOT been authorized yet stops meaning
+# anything. test_the_window_these_timings_assume_is_the_real_one keeps them
+# tied together.
+STEP_S = 0.2
+WINDOW_S = 3.0
+WINDOW_STEPS = int(round(WINDOW_S / STEP_S))
+BASE_S = 100.0
+
+
+def at_window(offset_steps=0, windows=1):
+    """A stamp that has crossed the window `windows` times over."""
+    return BASE_S + windows * WINDOW_S + offset_steps * STEP_S
+
+
 cg = load("cluster_guard")
 ct = load("cluster_tracking")
 ms = load("motion_safety")
@@ -268,16 +285,16 @@ def test_recorded_stationary_person_eventually_allows_safe_bypass(monkeypatch):
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
 
     assert follower.planner.calls == []
     assert published[-1] == "HOLD:DWA_WAIT"
     assert commanded[-1] == "STOP"
 
-    follower.cluster_summary = summary_at(110.0, [person])
+    follower.cluster_summary = summary_at(at_window(), [person])
     follower.step()
 
     assert len(follower.planner.calls) == 1
@@ -301,9 +318,9 @@ def test_committed_person_bypass_survives_lateral_arc(monkeypatch):
     person.update({"id": 16, "motion": ct.STATIC})
     _module, follower, _published, _commanded = dwa_with(
         [person], monkeypatch)
-    for index in range(51):
+    for index in range(WINDOW_STEPS + 1):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
     committed_calls = len(follower.planner.calls)
     person.update({
@@ -320,7 +337,7 @@ def test_committed_person_bypass_survives_lateral_arc(monkeypatch):
     # When: the same static track remains directly observed through the arc.
     for index in range(6):
         follower.cluster_summary = summary_at(
-            110.2 + index * 0.2, [person])
+            at_window(1) + index * STEP_S, [person])
         follower.step()
 
     # Then: every cycle remains a person-bypass plan instead of forgetting
@@ -356,15 +373,15 @@ def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch, threat_distance_stop_radius=1.0)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
 
     assert not any(text.startswith("HOLD") for text in published), (
         "the chair stopped to watch someone it had not yet had to stop for")
     assert commanded[-1] != "STOP"
-    assert len(follower.planner.calls) == 50
+    assert len(follower.planner.calls) == WINDOW_STEPS
     approach = follower.planner.calls[-1]
     assert approach["obstacles"], (
         "the person was not in planner geometry during the approach")
@@ -375,10 +392,10 @@ def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
     assert published[-1].startswith("DWA:APPROACH"), (
         "the operator cannot see where a ten-second approach began")
 
-    follower.cluster_summary = summary_at(110.0, [person])
+    follower.cluster_summary = summary_at(at_window(), [person])
     follower.step()
 
-    assert len(follower.planner.calls) == 51
+    assert len(follower.planner.calls) == WINDOW_STEPS + 1
     assert follower.planner.calls[-1]["obstacles"]
     assert follower.avoidance_state == cg.GO_ROUND
 
@@ -390,12 +407,12 @@ def test_one_static_frame_after_long_motion_does_not_authorize_bypass(
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
     person["motion"] = ct.STATIC
-    follower.cluster_summary = summary_at(110.0, [person])
+    follower.cluster_summary = summary_at(at_window(), [person])
     follower.step()
 
     assert follower.planner.calls == []
@@ -409,22 +426,22 @@ def test_a_person_dropout_restarts_static_bypass_qualification(monkeypatch):
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
-    follower.cluster_summary = summary_at(110.0, [])
+    follower.cluster_summary = summary_at(at_window(), [])
     follower.step()
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            110.2 + index * 0.2, [person])
+            at_window(1) + index * STEP_S, [person])
         follower.step()
 
     assert follower.planner.calls == []
     assert published[-1] == "HOLD:DWA_WAIT"
     assert commanded[-1] == "STOP"
 
-    follower.cluster_summary = summary_at(120.2, [person])
+    follower.cluster_summary = summary_at(at_window(1, windows=2), [person])
     follower.step()
 
     assert len(follower.planner.calls) == 1
@@ -437,20 +454,22 @@ def test_a_producer_stamp_gap_restarts_static_bypass_qualification(
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
-    for index in range(50):
+    # A gap wider than PERSON_BYPASS_MAX_GAP_S, then a fresh full window.
+    restart = at_window(3)
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            110.4 + index * 0.2, [person])
+            restart + index * STEP_S, [person])
         follower.step()
 
     assert follower.planner.calls == []
     assert published[-1] == "HOLD:DWA_WAIT"
     assert commanded[-1] == "STOP"
 
-    follower.cluster_summary = summary_at(120.4, [person])
+    follower.cluster_summary = summary_at(restart + WINDOW_S, [person])
     follower.step()
 
     assert len(follower.planner.calls) == 1
@@ -464,20 +483,20 @@ def test_a_replacement_person_id_restarts_bypass_qualification(monkeypatch):
     _module, follower, published, commanded = dwa_with(
         [first], monkeypatch)
 
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [first])
+            BASE_S + index * STEP_S, [first])
         follower.step()
-    for index in range(50):
+    for index in range(WINDOW_STEPS):
         follower.cluster_summary = summary_at(
-            110.0 + index * 0.2, [replacement])
+            at_window() + index * STEP_S, [replacement])
         follower.step()
 
     assert follower.planner.calls == []
     assert published[-1] == "HOLD:DWA_WAIT"
     assert commanded[-1] == "STOP"
 
-    follower.cluster_summary = summary_at(120.0, [replacement])
+    follower.cluster_summary = summary_at(at_window(windows=2), [replacement])
     follower.step()
 
     assert len(follower.planner.calls) == 1
@@ -489,14 +508,14 @@ def test_a_moving_person_revokes_an_authorized_bypass(monkeypatch):
     _module, follower, published, commanded = dwa_with(
         [person], monkeypatch)
 
-    for index in range(51):
+    for index in range(WINDOW_STEPS + 1):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
     assert len(follower.planner.calls) == 1
 
     person["motion"] = ct.MOVING
-    follower.cluster_summary = summary_at(110.2, [person])
+    follower.cluster_summary = summary_at(at_window(1), [person])
     follower.step()
 
     assert len(follower.planner.calls) == 1
@@ -513,9 +532,9 @@ def test_a_second_moving_person_prevents_static_person_bypass(monkeypatch):
     _module, follower, published, commanded = dwa_with(
         people, monkeypatch)
 
-    for index in range(51):
+    for index in range(WINDOW_STEPS + 1):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, people)
+            BASE_S + index * STEP_S, people)
         follower.step()
 
     assert follower.planner.calls == []
@@ -532,7 +551,7 @@ def test_a_person_without_valid_track_identity_never_authorizes_bypass(
 
     for index in range(60):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
 
     assert follower.planner.calls == []
@@ -553,7 +572,7 @@ def test_a_person_with_malformed_geometry_never_authorizes_bypass(
 
     for index in range(60):
         follower.cluster_summary = summary_at(
-            100.0 + index * 0.2, [person])
+            BASE_S + index * STEP_S, [person])
         follower.step()
 
     assert follower.planner.calls == []
@@ -912,3 +931,12 @@ def test_both_obstacle_vetoes_count(reason):
     assert module.gate_stall(reason, 2.0)
     assert not module.gate_stall(reason, 0.1)
     assert not module.gate_stall(reason, None)
+
+
+def test_the_window_these_timings_assume_is_the_real_one():
+    """Every stamp above is built from WINDOW_S. If the follower's window
+    moves and this does not, the tests keep passing while testing a
+    different question - which is how a 10 s constant nobody could satisfy
+    survived in the first place."""
+    module, _stamp = load_follower("waypoint_follower")
+    assert WINDOW_S == module.PERSON_BYPASS_CONFIRM_S
