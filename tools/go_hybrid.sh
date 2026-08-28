@@ -12,6 +12,10 @@ source "$LOCALIZATION_WS/devel/setup.bash"
 
 fail() { echo "REFUSING TO START: $*" >&2; exit 1; }
 
+# The profile the stack was BROUGHT UP with decides this, not a default here.
+# Defaulting it true refused the drive on a stack that had deliberately
+# started without the detector - see tools/perception_profile.sh.
+. "$SCRIPT_DIR/perception_profile.sh"
 START_POINTPILLARS="${START_POINTPILLARS:-true}"
 REQUIRE_GPU="${REQUIRE_GPU:-true}"
 POINTPILLARS_REQUIRE_RTX2060="${POINTPILLARS_REQUIRE_RTX2060:-true}"

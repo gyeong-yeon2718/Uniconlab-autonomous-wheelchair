@@ -22,7 +22,9 @@ from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-LAUNCHER = REPO / "tools" / "start_hybrid_avoidance.sh"
+LAUNCHER = REPO / "tools" / "perception_profile.sh"
+BRINGUP = REPO / "tools" / "start_hybrid_avoidance.sh"
+DRIVE = REPO / "tools" / "go_hybrid.sh"
 GEOMETRIC = (REPO / "src" / "static_livox_localization" / "scripts"
              / "hybrid_geometric_objects.py")
 
@@ -92,7 +94,7 @@ def test_an_unknown_profile_is_refused_rather_than_guessed():
 
 def test_the_subtraction_choice_reaches_the_node():
     assert '_fixed_map_subtraction:="$GEOMETRIC_FIXED_MAP_SUBTRACTION"' \
-        in launcher()
+        in BRINGUP.read_text(encoding="utf-8")
     assert '_bool_param("fixed_map_subtraction", True)' \
         in GEOMETRIC.read_text(encoding="utf-8")
 
@@ -120,3 +122,32 @@ def test_the_warning_only_fires_when_the_map_is_actually_ignored():
     warning = text.index("fixed-map subtraction is OFF")
     guard = text.index("if legacy.FixedMapFilter is KeepAllGeometry:")
     assert guard < warning
+
+
+def test_the_bring_up_and_the_drive_read_the_same_profile():
+    """They did not, and the chair stopped at waypoint 42 because of it.
+
+    The profile lived in start_hybrid_avoidance.sh alone, so the bring-up
+    honoured PERCEPTION_PROFILE=legacy_geometric and started without the
+    learned detector - while go_hybrid.sh defaulted START_POINTPILLARS to
+    true on its own, demanded /rtx_pointpillars and
+    ~/.config/unicon/pointpillars.env, found neither, and printed REFUSING
+    TO START. The follower reported DRIVING the whole time; only /wheel_cmd
+    said STOP.
+
+    One sourced copy, and the source has to come BEFORE the local default or
+    the default wins.
+    """
+    for path in (BRINGUP, DRIVE):
+        text = path.read_text(encoding="utf-8")
+        assert '. "$SCRIPT_DIR/perception_profile.sh"' in text, path.name
+    drive = DRIVE.read_text(encoding="utf-8")
+    assert drive.index('. "$SCRIPT_DIR/perception_profile.sh"') <         drive.index('START_POINTPILLARS="${START_POINTPILLARS:-true}"')
+
+
+def test_neither_entry_point_keeps_its_own_copy_of_the_profile():
+    """A second copy drifts; that is what this whole file is about."""
+    for path in (BRINGUP, DRIVE):
+        text = path.read_text(encoding="utf-8")
+        assert "legacy_geometric)" not in text, (
+            "%s re-implements the profile instead of sourcing it" % path.name)

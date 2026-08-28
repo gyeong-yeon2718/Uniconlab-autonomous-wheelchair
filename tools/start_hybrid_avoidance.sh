@@ -60,59 +60,9 @@ BASE_START="${BASE_START:-$HOME/start_wheelchair_localization.sh}"
 [ -f "$LOCALIZATION_WS/devel/setup.bash" ] || \
   fail "localization workspace is not built: $LOCALIZATION_WS"
 
-# Perception profile. Only sets defaults; anything exported explicitly wins.
-#
-# The 2026-08-27 graph reported the mapped world as novel obstacles. Across
-# the producer swap inside the 2026-08-28 drive - same route, same sensor,
-# nineteen minutes apart - objects per frame went from mean 1.73 / max 7 to
-# mean 5.05 / max 23, and 16 % of frames carried eight or more. The learned
-# detector was not the cause: 49,666 of 49,818 published objects after the
-# swap were geometric. Two settings produce it, and both are rolled back
-# here rather than in the code, so a bag replay can still ask for either.
-PERCEPTION_PROFILE="${PERCEPTION_PROFILE:-legacy_geometric}"
-case "$PERCEPTION_PROFILE" in
-  legacy_geometric)
-    : "${START_POINTPILLARS:=false}"
-    # Subtraction stays OFF here, and that is not the 2026-08-27 setting
-    # returning by accident.
-    #
-    # safety_gate has never had fixed-map subtraction: it works on raw
-    # returns inside a height band and cannot tell a mapped wall from a
-    # person. Subtracting the map for the CLUSTER producer therefore does
-    # not remove that wall from the chair's world - it removes it from the
-    # follower's half of it, while the gate goes on sweeping into it. The
-    # follower then reports a clear corridor, proposes an arc, and the gate
-    # refuses; GATE_STALL is the named diagnostic for exactly that split.
-    #
-    # Measured on the 2026-08-28 16:11 drive with subtraction ON: the
-    # follower saw two objects, both outside the band, while the gate held
-    # 9,838 obstacle points and refused OBSTACLE_SWEEP on 17 of 20 samples
-    # with zone_points 0 - nothing straight ahead, the swept arc into the
-    # wall the follower had been denied. The chair reached wp 42 and stopped.
-    #
-    # The object inflation this profile exists to undo had two causes and
-    # the thresholds below are the one that can be fixed without blinding
-    # half the stack: 1/5/80 splits one object into several. Until the gate
-    # and the producer share a world, the planner has to see what can veto
-    # it - which is the same rule the swept-rectangle work rests on.
-    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"
-    # obstacle_clusters' own field-tested thresholds. The experimental
-    # profile halves them, which is what turns one object into several.
-    : "${GEOMETRIC_MIN_CELL_POINTS:=2}"
-    : "${GEOMETRIC_MIN_CLUSTER_POINTS:=8}"
-    : "${GEOMETRIC_MAX_CLUSTERS:=40}"
-    ;;
-  hybrid_experimental)
-    : "${START_POINTPILLARS:=true}"
-    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"
-    : "${GEOMETRIC_MIN_CELL_POINTS:=1}"
-    : "${GEOMETRIC_MIN_CLUSTER_POINTS:=5}"
-    : "${GEOMETRIC_MAX_CLUSTERS:=80}"
-    ;;
-  *)
-    fail "PERCEPTION_PROFILE must be legacy_geometric or hybrid_experimental"
-    ;;
-esac
+# Perception profile defaults, shared with go_hybrid.sh so the bring-up and
+# the drive cannot disagree about whether the learned detector is running.
+. "$SCRIPT_DIR/perception_profile.sh"
 
 START_POINTPILLARS="${START_POINTPILLARS:-true}"
 PREFER_DWA_GPU="${PREFER_DWA_GPU:-true}"
