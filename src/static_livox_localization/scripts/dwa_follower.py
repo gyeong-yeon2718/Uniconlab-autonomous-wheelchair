@@ -82,7 +82,7 @@ from std_msgs.msg import String
 
 import dwa_core
 import mpc_speed
-from cluster_guard import (APPROACH, GO_ROUND, PERSON_BYPASS,
+from cluster_guard import (APPROACH, GO_ROUND,
                            PERSON_BYPASS_CLEARANCE_M,
                            PERSON_BYPASS_SPEED_MPS, WAIT,
                            corridor_obstacle_points)
@@ -367,8 +367,8 @@ class DwaFollower(WaypointFollower):
             self.send_stop()
             self.last_command_stamp = None
             return
-        if decision == PERSON_BYPASS and self.tracking_state != "TRACKING":
-            self.publish_state("HOLD:PERSON_BYPASS_TRACKING", "HOLD")
+        if decision == GO_ROUND and self.tracking_state != "TRACKING":
+            self.publish_state("HOLD:BYPASS_TRACKING", "HOLD")
             self.send_stop()
             self.last_command_stamp = None
             return
@@ -400,7 +400,7 @@ class DwaFollower(WaypointFollower):
         if threat is not None:
             cap = approach_cap(cap, threat.distance_m, stop_m,
                                dwa_core.TURN_FLOOR_SPEED)
-        if decision in (PERSON_BYPASS, APPROACH):
+        if decision in (GO_ROUND, APPROACH):
             # An approach is served at the speed the pass will be taken at.
             # Arriving faster than that only buys a shorter look and a
             # harder stop, and the gate's braking envelope grows with speed.
@@ -421,7 +421,7 @@ class DwaFollower(WaypointFollower):
         # object is in the geometry for the entire approach and only the
         # authorization waits.
         obstacles = self.obstacle_points(state) if decision in (
-            GO_ROUND, PERSON_BYPASS, APPROACH) else ()
+            GO_ROUND, APPROACH) else ()
         # Plan from where the chair will be when the command lands, not from
         # where it is. The gap was measured on 2026-08-11 by cross-correlating
         # commanded angular.z against the yaw rate differentiated from
@@ -435,9 +435,16 @@ class DwaFollower(WaypointFollower):
             state, obstacles, speed_cap=cap,
             last_yaw_rate=self.last_yaw_rate,
             last_speed=self.current_speed,
+            # The label picks the berth and nothing else, and it picks it
+            # once for the whole window: a body called a person on any frame
+            # keeps the wider clearance on every frame. Under a label that
+            # alternates - 56 times on one stationary body on 2026-08-28 -
+            # reading it per cycle would widen and narrow the berth around
+            # someone standing still.
             obstacle_floor_m=(
                 PERSON_BYPASS_CLEARANCE_M
-                if decision in (PERSON_BYPASS, APPROACH)
+                if (decision in (GO_ROUND, APPROACH)
+                    and self.bypass_berth_is_person())
                 else dwa_core.OBSTACLE_FLOOR_M))
         if status != "OK":
             if status != self.dwa_status:
@@ -489,13 +496,13 @@ class DwaFollower(WaypointFollower):
         self.last_yaw_rate = yaw_rate
         self.publish_state(
             "DWA%s wp=%d/%d v=%.2f w=%+.2f target %.2f/%+.2f%s" % (
-                "" if self.avoidance_state not in (APPROACH, PERSON_BYPASS)
+                "" if self.avoidance_state not in (APPROACH, GO_ROUND)
                 else (":APPROACH" if self.avoidance_state == APPROACH
-                      else ":PERSON_BYPASS"),
+                      else ":BYPASS"),
                 self.nearest_index, len(self.waypoints), speed, yaw_rate,
                 target_v, target_w,
                 "" if self.policies else " POLICIES_OFF"),
-            "DWA:OK" if self.avoidance_state not in (APPROACH, PERSON_BYPASS)
+            "DWA:OK" if self.avoidance_state not in (APPROACH, GO_ROUND)
             else "DWA:" + str(self.avoidance_state).upper())
 
     def publish_state(self, text, state=None):

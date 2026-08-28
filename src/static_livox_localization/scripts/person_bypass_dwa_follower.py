@@ -25,7 +25,7 @@ from gpu_dwa_backend import GpuRequiredError, install_gpu_planner
 # Install before DwaFollower constructs dwa_core.DwaPlanner. Environment and
 # ROS params still choose CuPy or the diagnostic CPU path.
 install_gpu_planner(dwa_core)
-from cluster_guard import PERSON_BYPASS  # noqa: E402
+from cluster_guard import GO_ROUND  # noqa: E402
 from dwa_follower import DwaFollower  # noqa: E402
 from person_bypass_policy import (  # noqa: E402
     StaticPersonQualifier,
@@ -139,7 +139,7 @@ class PersonBypassDwaFollower(DwaFollower):
 
         permit = self.observed_person_permit(now)
         self.publish_permit(permit)
-        if not permit.active or ordinary != PERSON_BYPASS:
+        if not permit.active or ordinary != GO_ROUND:
             return ordinary
 
         # The base has authorized the pass and the permit is live, so the raw

@@ -594,3 +594,63 @@ def test_the_shared_verdict_is_the_same_one_contains_many_gives(scene):
     # and it really is discriminating, not vacuously all-True
     verdict = band.contains_many(points)
     assert verdict.any() and not verdict.all()
+
+
+def asymmetric_band_scene(tmp_path, mask, left_m, right_m):
+    """A straight corridor with deliberately unequal room either side."""
+    route = np.array([[index * 0.25, 0.0] for index in range(33)])
+    stations = [{
+        "x": float(x),
+        "y": float(y),
+        "heading_deg": 0.0,
+        "left_m": float(left_m),
+        "right_m": float(right_m),
+    } for x, y in route]
+    path = tmp_path / ("asymmetric-%s-%s.json" % (left_m, right_m))
+    path.write_text(json.dumps({"stations": stations}))
+    band = SafetyBand(str(path))
+    planner = dwa_core.DwaPlanner(band, route, route_mask=mask)
+    return band, route, planner
+
+
+def test_it_goes_round_on_the_side_the_band_has_room_on(tmp_path):
+    """Which way to go round, when both ways are admissible.
+
+    W_CENTRE is normalised by the corridor's half width, so it says how far
+    off centre an arc is and not how many metres are actually there. Faced
+    with something on the line it scored a step into a narrow shoulder much
+    like a step into a wide one and chose on path cost and progress, which
+    is how the chair commits to the tight side and then has nowhere to
+    finish the manoeuvre.
+    """
+    for wide_side in ("left", "right"):
+        left = 2.5 if wide_side == "left" else 0.7
+        right = 0.7 if wide_side == "left" else 2.5
+        band, route, planner = asymmetric_band_scene(
+            tmp_path, OpenDrivableMask(), left, right)
+        state = on_route(route, 4)
+        heading = np.array([math.cos(state[2]), math.sin(state[2])])
+        blocker = state[:2] + heading * 1.6
+
+        v, w, status = planner.plan(
+            state, obstacles=(blocker,), last_speed=0.35)
+
+        assert status == "OK", status
+        assert v > 0.0
+        if wide_side == "left":
+            assert w > 0.0, "turned into the 0.7 m side with 2.5 m available"
+        else:
+            assert w < 0.0, "turned into the 0.7 m side with 2.5 m available"
+
+
+def test_the_room_preference_is_inert_with_nothing_to_go_round(tmp_path):
+    """It must not pull the chair off the recorded line on open road: the
+    reward is scaled by obstacle pressure, which is zero when clear."""
+    band, route, planner = asymmetric_band_scene(
+        tmp_path, OpenDrivableMask(), 2.5, 0.7)
+    state = on_route(route, 4)
+
+    v, w, status = planner.plan(state, obstacles=(), last_speed=0.35)
+
+    assert status == "OK"
+    assert abs(w) < 1e-9, "the band's asymmetry steered a clear corridor"

@@ -198,108 +198,102 @@ def threat(distance, motion):
 
 
 def decide(threat_in, blocking=True, blocked_for_s=0.0,
-           person_bypass_ready=False):
+           stationary_bypass_ready=False):
     return cg.avoidance_decision(
         threat_in, blocking, blocked_for_s, 5.0, 3.0,
-        person_bypass_ready=person_bypass_ready)
-
-
-def test_something_watched_standing_still_is_gone_around_from_a_distance():
-    """The behaviour asked for: seen from far off and parked, drift past it
-    rather than driving up to it and stopping."""
-    assert decide(threat(4.0, ct.STATIC), blocking=False) == cg.GO_ROUND
-
-
-def test_a_parked_thing_still_far_off_is_left_alone():
-    assert decide(threat(9.0, ct.STATIC), blocking=False) == cg.CLEAR
-
-
-@pytest.mark.parametrize("motion", [ct.MOVING, ct.UNKNOWN])
-def test_anything_moving_or_unjudged_is_waited_out_not_driven_around(motion):
-    assert decide(threat(2.0, motion)) == cg.WAIT
-
-
-def test_a_moving_thing_is_never_gone_around_however_long_it_blocks():
-    """The 3 s rule is evidence of parkedness for sources that cannot track.
-    It must not overrule one that can: someone pacing in the corridor has
-    blocked it for 3 s and is still going to step somewhere."""
-    assert decide(threat(1.0, ct.MOVING), blocked_for_s=30.0) == cg.WAIT
-
-
-def test_an_untrackable_return_that_has_not_moved_for_3s_is_gone_around():
-    """The raw scan has no identity, so standing there is all the evidence
-    it can offer, and this is the pre-existing behaviour it keeps."""
-    assert decide(threat(1.0, ct.UNKNOWN), blocked_for_s=4.0) == cg.GO_ROUND
+        stationary_bypass_ready=stationary_bypass_ready)
 
 
 def person(distance, motion):
     return cg.Threat(distance, motion, cg.PERSON_LABEL)
 
 
-def test_a_person_standing_still_is_waited_for_not_driven_around():
-    """The rule the docstring always claimed and the code only half kept.
+# ------------------------------------------------- what actually branches
 
-    CONFIRM_S is 1.5 s, so someone who stops to check a phone is STATIC,
-    and STATIC is parked - which sent the chair around a stationary
-    pedestrian from 8 m out without the blocked clock ever starting.
+@pytest.mark.parametrize("motion", [ct.MOVING])
+def test_moving_is_the_thing_that_is_waited_out(motion):
+    """The one rule that separates cases, and the only one that should.
 
-    Still true, and APPROACH does not weaken it: neither answer here is
-    GO_ROUND or PERSON_BYPASS, so nothing may pass this person on the
-    tracker's word. What APPROACH changes is only whether the chair is
-    standing or still closing while it waits for the real authorization.
+    Something that is going to step somewhere is not to be stepped around,
+    whatever it is; the arc goes into where it is about to be. Neither the
+    class label nor the evidence window can reach past this.
     """
-    assert decide(person(4.0, ct.STATIC), blocking=False) == cg.APPROACH
-    assert decide(person(4.0, ct.STATIC)) == cg.WAIT
-    for blocking in (True, False):
-        assert decide(person(4.0, ct.STATIC), blocking=blocking) not in (
-            cg.GO_ROUND, cg.PERSON_BYPASS)
+    for build in (threat, person):
+        assert decide(build(2.0, motion)) == cg.WAIT
+        assert decide(build(2.0, motion), blocking=False) == cg.CLEAR
+        assert decide(build(1.0, motion), blocked_for_s=30.0) == cg.WAIT
+        assert decide(build(1.0, motion), blocked_for_s=30.0,
+                      stationary_bypass_ready=True) == cg.WAIT
 
 
-def test_a_person_is_not_gone_around_by_the_time_rule_either():
-    """The slower road to the same place. Standing in the way for three
-    seconds is evidence of parkedness for a thing; for a person it is
-    evidence of nothing but that they are standing there."""
-    assert decide(person(1.0, ct.STATIC), blocked_for_s=30.0) == cg.WAIT
-    assert decide(person(1.0, ct.UNKNOWN), blocked_for_s=30.0) == cg.WAIT
+def test_the_class_label_no_longer_changes_the_decision():
+    """The 2026-08-28 finding, as a property.
+
+    131 of the 587 tracks seen for 20 frames or more changed class label at
+    least once; one stationary body 2.61 m ahead alternated person/obstacle
+    56 times. A policy branching on that label does not run one rule for
+    people and another for objects - it alternates between them on the same
+    body several times a second. Whatever the answer is, it has to be the
+    same answer at both ends of the flicker.
+    """
+    for motion in (ct.STATIC, ct.MOVING, ct.UNKNOWN):
+        for blocking in (True, False):
+            for ready in (True, False):
+                for blocked_for_s in (0.0, 30.0):
+                    assert decide(
+                        threat(2.0, motion), blocking, blocked_for_s,
+                        stationary_bypass_ready=ready) == decide(
+                        person(2.0, motion), blocking, blocked_for_s,
+                        stationary_bypass_ready=ready)
 
 
-def test_a_person_needs_explicit_static_bypass_authorization():
-    assert decide(
-        person(1.0, ct.STATIC),
-        blocked_for_s=30.0,
-        person_bypass_ready=True) == cg.PERSON_BYPASS
-    assert decide(
-        person(1.0, ct.MOVING),
-        blocked_for_s=30.0,
-        person_bypass_ready=True) == cg.WAIT
+# ------------------------------------------ standing in the way, anything
+
+def test_a_confirmed_stationary_blocker_is_gone_round():
+    """Person or object, once the evidence window has closed on it."""
+    for build in (threat, person):
+        assert decide(build(4.0, ct.STATIC), blocking=False,
+                      stationary_bypass_ready=True) == cg.GO_ROUND
+        assert decide(build(1.0, ct.STATIC), blocked_for_s=30.0,
+                      stationary_bypass_ready=True) == cg.GO_ROUND
 
 
-def test_a_static_person_is_watched_while_closing_not_while_stopped():
-    """Unauthorized is APPROACH out here, and WAIT once inside the stop
-    radius. Serving the wait at a standstill is what authorized four of the
-    2026-08-28 tracks at about 2 m, where the arc no longer fits."""
-    assert decide(
-        person(4.0, ct.STATIC),
-        blocking=False,
-        person_bypass_ready=False) == cg.APPROACH
-    assert decide(
-        person(4.0, ct.STATIC),
-        blocking=True,
-        person_bypass_ready=False) == cg.WAIT
-    assert decide(
-        person(4.0, ct.STATIC),
-        blocking=False,
-        person_bypass_ready=True) == cg.PERSON_BYPASS
+def test_an_unconfirmed_stationary_blocker_is_closed_on_not_passed():
+    """APPROACH is the run-up, not permission.
+
+    Before 2026-08-28 a parked OBJECT was gone round on the tracker's 1.5 s
+    CONFIRM_S from 8 m, and a parked PERSON was stopped for. Both now serve
+    one window, and both keep closing while it runs - which is what puts the
+    commitment at about 4 m rather than at 8 m on thin evidence or at 2 m
+    after standing still.
+    """
+    for build in (threat, person):
+        assert decide(build(4.0, ct.STATIC), blocking=False) == cg.APPROACH
+        assert decide(build(4.0, ct.STATIC), blocking=True) == cg.WAIT
+        assert decide(build(4.0, ct.STATIC)) != cg.GO_ROUND
 
 
-def test_approach_is_only_ever_offered_for_a_parked_person():
-    """A moving person is never approached with their geometry in hand -
-    that is the arc-around-a-walker defect, and it stays refused."""
-    for motion in (ct.MOVING, ct.UNKNOWN):
-        assert decide(person(4.0, motion), blocking=False) != cg.APPROACH
-        assert decide(person(4.0, motion), blocking=True) == cg.WAIT
-    # A parked OBJECT already had the early answer; it keeps it.
-    assert decide(threat(4.0, ct.STATIC), blocking=False) == cg.GO_ROUND
+def test_a_parked_thing_still_far_off_is_left_alone():
+    for build in (threat, person):
+        assert decide(build(9.0, ct.STATIC), blocking=False) == cg.CLEAR
+
+
+def test_an_untrackable_return_that_has_not_moved_for_3s_is_gone_around():
+    """The raw scan has no identity, so no same-track window can ever be
+    built for it and standing there is all the evidence it can offer. The
+    pre-existing fallback, unchanged - and still refused to anything the
+    tracker says is moving."""
+    for build in (threat, person):
+        assert decide(build(1.0, ct.UNKNOWN), blocked_for_s=4.0) == cg.GO_ROUND
+        assert decide(build(1.0, ct.UNKNOWN), blocked_for_s=0.0) == cg.WAIT
+
+
+def test_an_unjudged_return_is_not_approached_on_no_evidence():
+    """UNKNOWN is not STATIC. It reaches the time rule or it waits; it never
+    gets the run-up, which is for something the tracker has actually
+    watched stand still."""
+    for build in (threat, person):
+        assert decide(build(4.0, ct.UNKNOWN), blocking=False) != cg.APPROACH
 
 
 def test_a_person_who_leaves_the_corridor_clears_it():
@@ -307,10 +301,16 @@ def test_a_person_who_leaves_the_corridor_clears_it():
     assert decide(None, blocking=False) == cg.CLEAR
 
 
-def test_the_same_geometry_without_the_label_is_still_gone_around():
-    """The exclusion is the label, not a general loss of nerve: a parked
-    motorcycle at the same range is still a thing to drift past."""
-    assert decide(threat(4.0, ct.STATIC), blocking=False) == cg.GO_ROUND
+def test_the_label_still_costs_the_object_nothing_once_confirmed():
+    """There used to be an exclusion here - the parked motorcycle was gone
+    round from 8 m while the person at the same range was not. There is no
+    exclusion left to test, because there is no label branch: what the
+    object gives up is 1.5 s of evidence against the full window, and what
+    it gains is that it stops being a different code path from the person
+    standing in the same place."""
+    assert decide(threat(4.0, ct.STATIC), blocking=False,
+                  stationary_bypass_ready=True) == cg.GO_ROUND
+    assert decide(threat(4.0, ct.STATIC), blocking=False) == cg.APPROACH
 
 
 @pytest.mark.parametrize("label", ["Person", " person ", "PERSON"])
@@ -320,8 +320,9 @@ def test_the_label_is_matched_the_way_producers_actually_write_it(label):
 
 @pytest.mark.parametrize("label", ["", "obstacle", "vehicle", "personnel"])
 def test_nothing_else_is_quietly_treated_as_a_person(label):
-    """This exclusion only ever adds caution. A label it does not
-    recognise must not become one it is unwilling to pass."""
+    """is_person no longer gates the decision, but it still picks the berth,
+    and a label the producer did not write must not widen or narrow it by
+    accident."""
     assert not cg.Threat(2.0, ct.STATIC, label).is_person
 
 

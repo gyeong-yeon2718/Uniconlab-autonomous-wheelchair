@@ -72,7 +72,7 @@ from cluster_guard import (ACCUMULATION_S as CLUSTER_ACCUMULATION_S,
                            BYPASS_EDGE_KEEP_M, BYPASS_OFFSET_MAX_M,
                            BYPASS_OFFSET_MIN_M, BYPASS_OFFSETS,
                            APPROACH, BYPASS_PROBE_AHEAD_M, GO_ROUND, Threat,
-                           PERSON_BYPASS, PERSON_LABEL,
+                           PERSON_LABEL,
                            avoidance_decision, bypass_offsets_for_room,
                            is_stale, matching_threats, nearest_threat,
                            parse_summary)
@@ -239,6 +239,7 @@ class WaypointFollower:
     person_memory = None
     person_stop_release_m = None
     direct_person_threats = ()
+    bypass_saw_person = False
     person_static_track_id = None
     person_static_since_s = None
     person_static_last_stamp_s = None
@@ -371,6 +372,7 @@ class WaypointFollower:
         self.person_memory = None
         self.person_stop_release_m = None
         self.direct_person_threats = ()
+        self.bypass_saw_person = False
         self.person_static_track_id = None
         self.person_static_since_s = None
         self.person_static_last_stamp_s = None
@@ -786,20 +788,56 @@ class WaypointFollower:
             None if self.blocked_since is None
             else (now - self.blocked_since).to_sec(),
             PLAN_AHEAD_M, BYPASS_AFTER_S,
-            person_bypass_ready=self.person_bypass_ready(threat, blocking))
+            stationary_bypass_ready=self.stationary_bypass_ready(
+                threat, blocking))
 
     def reset_person_bypass_evidence(self):
         self.person_static_track_id = None
         self.person_static_since_s = None
         self.person_static_last_stamp_s = None
         self.person_bypass_committed_track_id = None
+        self.bypass_saw_person = False
 
-    def person_bypass_ready(self, threat, _blocking):
-        """Direct same-track STATIC evidence required before a person arc."""
-        people = self.direct_person_threats
+    def other_people_present(self, threat):
+        """A second person in the maneuver region, besides the tracked body.
+
+        The only guard the class label still gates, and the one place being
+        wrong about the label is safe: a crowd that flickers to obstacle
+        merely loses this check, while a mislabelled bystander keeps it. A
+        group is not a parked object - people shift around each other - so
+        the window does not run while one is standing beside the thing being
+        gone round.
+        """
+        return any(
+            candidate.track_id != threat.track_id
+            for candidate in self.direct_person_threats)
+
+    def bypass_berth_is_person(self):
+        """Whether the committed body has ever carried the person label."""
+        return bool(getattr(self, "bypass_saw_person", False))
+
+    def stationary_bypass_ready(self, threat, _blocking):
+        """Direct same-track STATIC evidence before going round anything.
+
+        Keyed on track identity, deliberately not on the class label. The
+        2026-08-28 drive changed the label of 131 of 587 stable tracks at
+        least once, and on one stationary body 2.61 m ahead it alternated
+        person/obstacle 56 times - so a window that required a stable
+        label never closed, and this returned False for the whole
+        approach while the chair drove up to the thing and stopped.
+
+        What the window still requires is unchanged and is what matters:
+        the same tracked body, directly observed, with usable geometry,
+        continuously STATIC, while localization is TRACKING. A pause is
+        not a parked object at either end of the label.
+
+        bypass_saw_person is the one thing the label is still read for.
+        It latches for the window, so a body that was called a person on
+        any frame keeps the wider person berth on every frame - the
+        flicker can only ever widen the berth, never narrow it.
+        """
         eligible = (
             threat is not None
-            and threat.is_person
             and threat.parked
             and threat.distance_m < PLAN_AHEAD_M
             and threat.directly_observed
@@ -807,15 +845,13 @@ class WaypointFollower:
             and threat.observed_stamp_s is not None
             and threat.geometry_valid
             and self.tracking_state == "TRACKING"
-            and len(people) == 1
-            and people[0].track_id == threat.track_id
-            and people[0].parked
-            and people[0].directly_observed
-            and people[0].geometry_valid
+            and not self.other_people_present(threat)
         )
         if not eligible:
             self.reset_person_bypass_evidence()
             return False
+        if threat.is_person:
+            self.bypass_saw_person = True
         if self.person_bypass_committed_track_id == threat.track_id:
             return True
         stamp_s = threat.observed_stamp_s
@@ -1189,12 +1225,17 @@ class WaypointFollower:
 
         decision = self.avoidance_for(
             now, threat, self.threat_blocks(threat, guard_stop))
-        if decision in (APPROACH, PERSON_BYPASS):
-            # Neither is available to this profile. PERSON_BYPASS is the pass
-            # itself and needs the DWA rollout; APPROACH is the run-up to it
-            # and would otherwise fall through to take_a_way_round below,
-            # which is a lateral offset - a sidestep past a person taken on
-            # evidence that has not finished arriving.
+        if decision == APPROACH or (
+                decision == GO_ROUND and self.bypass_berth_is_person()):
+            # Neither is available to this profile. Going round a person needs
+            # the DWA rollout and its swept-rectangle check; this profile only
+            # has take_a_way_round, which is a fixed lateral offset. APPROACH
+            # is the run-up and would otherwise fall through to exactly that.
+            #
+            # A parked OBJECT still reaches take_a_way_round below, as it
+            # always has - what changed on 2026-08-28 is that the two arrive
+            # under one decision, so the refusal reads the berth rather than
+            # the decision name.
             self.status_pub.publish(String(data="HOLD:PERSON_BYPASS_DWA_ONLY"))
             self.send_stop()
             return

@@ -50,7 +50,7 @@ def test_dwa_keeps_rtx_qualifies_while_paused_and_publishes_short_permit():
     assert "self.planner.max_speed = min(" not in follower
     assert "dwa_core.OBSTACLE_FLOOR_M =" not in follower
     assert "return GO_ROUND" not in follower
-    assert "ordinary != PERSON_BYPASS" in follower
+    assert "ordinary != GO_ROUND" in follower
     # Permit qualification happens before the inherited hold ladder can
     # return for PAUSED, otherwise a person already in front makes `go`
     # impossible forever.

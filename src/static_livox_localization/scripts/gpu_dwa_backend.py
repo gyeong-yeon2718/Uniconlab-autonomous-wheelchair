@@ -302,6 +302,14 @@ def make_gpu_planner(base_class, core_module):
             edge = np.abs(lateral - (hi + lo) / 2.0) / half
             centre = np.square(np.minimum(edge, 1.0)).reshape(
                 len(pairs), self.steps).mean(axis=1)
+            room_end = np.minimum(
+                (hi - lateral).reshape(len(pairs), self.steps)[:, -1],
+                (lateral - lo).reshape(len(pairs), self.steps)[:, -1])
+            room = np.clip(room_end, 0.0, core_module.ROOM_REWARD_CAP_M)
+            pressure = np.clip(
+                (core_module.ROOM_PRESSURE_RANGE_M - clear)
+                / core_module.ROOM_PRESSURE_RANGE_M, 0.0, 1.0)
+            room_reward = np.where(np.isfinite(clear), pressure, 0.0) * room
             overflow = (np.maximum(lo - lateral, 0.0) +
                         np.maximum(lateral - hi, 0.0))
             escaped = (~band_inside).reshape(
@@ -325,7 +333,8 @@ def make_gpu_planner(base_class, core_module):
                 core_module.W_PROGRESS * progress +
                 core_module.W_OBSTACLE * penalty +
                 core_module.W_STEER * steer +
-                core_module.W_CENTRE * centre + band_escape +
+                core_module.W_CENTRE * centre -
+                core_module.W_ROOM * room_reward + band_escape +
                 core_module.W_MASK_BOUNDARY * mask_boundary)
             cost = np.where(ok, cost, np.inf)
             best = int(np.argmin(cost))

@@ -482,8 +482,12 @@ def corridor_obstacle_points(summary, half_width_m, lateral_shift_m=0.0,
     return True, [point for _, points in found for point in points]
 
 
+# One outcome for anything confirmed stationary and in the way. There was a
+# second, PERSON_BYPASS, until 2026-08-28; splitting the decision by class
+# label split it by a signal perception does not hold steady, and the berth -
+# which is all the label was really choosing - is now read off the threat by
+# the caller instead. See avoidance_decision.
 GO_ROUND = "go_round"
-PERSON_BYPASS = "person_bypass"
 # Keep closing on something parked while the evidence for passing it is still
 # being gathered. Not an authorization: the caller plans with the object in
 # its geometry and at bypass speed, and may not offset, claim the gate permit
@@ -494,7 +498,7 @@ CLEAR = "clear"
 
 
 def avoidance_decision(threat, blocking, blocked_for_s, plan_ahead_m,
-                       bypass_after_s, person_bypass_ready=False):
+                       bypass_after_s, stationary_bypass_ready=False):
     """What to do about the nearest thing in the corridor.
 
     GO_ROUND for something the tracker has watched stand still, and taken
@@ -506,11 +510,29 @@ def avoidance_decision(threat, blocking, blocked_for_s, plan_ahead_m,
     Nothing here resumes the chair explicitly: once they leave the corridor
     the threat is gone, the answer becomes CLEAR, and it drives on.
 
-    A person is waited out by default. The caller may supply a separate
-    person_bypass_ready authorization only after longer, direct same-track
-    STATIC evidence; that produces a distinct result so only a controller
-    with current geometry and hard-mask rollout checks can execute it.
-    Standing still for the tracker's CONFIRM_S alone is never enough.
+    What is special is MOVING, not person. Something standing in the route
+    is blocking it whatever it is, and going round it is the job; something
+    that is going to step somewhere is not to be stepped around, whatever it
+    is. Until 2026-08-28 the split was person against object, and perception
+    cannot support that split: over the 2026-08-28 drive, 131 of the 587
+    tracks seen for 20 frames or more changed class label at least once, and
+    track 128 came back 200 obstacle against 191 person across 394 frames.
+    A policy that branches on that label does not implement one rule for
+    people and another for objects - it alternates between them at 1-3 Hz on
+    the same stationary body, and every alternation reset the evidence clock
+    that authorizes the pass. It also means the old rule was not holding in
+    the direction it was written for: a person whose label flickered to
+    obstacle was ALREADY being gone round from 8 m, on 1.5 s of evidence.
+
+    So the label chooses the BERTH and nothing else - the caller reads it off
+    the threat and keeps the wider person clearance whenever the track has
+    carried that label at any point in the window. The decision itself comes
+    from motion and from the route being blocked.
+
+    stationary_bypass_ready is that one evidence test, applied to everything:
+    continuous same-track STATIC observation, held long enough to mean parked
+    rather than paused. It replaces both the person-only window and the
+    object rule that needed no window at all.
 
     APPROACH is what a parked person gets while that evidence is still being
     gathered, and it is the whole 2026-08-28 finding. A parked OBJECT gets
@@ -533,16 +555,18 @@ def avoidance_decision(threat, blocking, blocked_for_s, plan_ahead_m,
     """
     if threat is None:
         return CLEAR
-    if threat.is_person:
-        if threat.parked and threat.distance_m < plan_ahead_m:
-            if person_bypass_ready:
-                return PERSON_BYPASS
-            return WAIT if blocking else APPROACH
+    if threat.motion == MOVING:
         return WAIT if blocking else CLEAR
     if threat.parked and threat.distance_m < plan_ahead_m:
-        return GO_ROUND
+        if stationary_bypass_ready:
+            return GO_ROUND
+        return WAIT if blocking else APPROACH
+    # UNKNOWN motion reaches here: a raw-scan return carries no
+    # identity, so standing in the way is the only evidence of
+    # parkedness it can offer and no same-track window can ever be
+    # built for it. Unchanged.
     if blocking and blocked_for_s is not None and \
-            blocked_for_s > bypass_after_s and threat.motion != MOVING:
+            blocked_for_s > bypass_after_s:
         return GO_ROUND
     return WAIT if blocking else CLEAR
 

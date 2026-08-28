@@ -57,7 +57,7 @@ from std_msgs.msg import String
 
 import mpc_core
 import mpc_speed
-from cluster_guard import APPROACH, GO_ROUND, PERSON_BYPASS, WAIT
+from cluster_guard import APPROACH, GO_ROUND, WAIT
 from mpc_anchor import DEFAULT_GAIN, StateAnchor
 from mpc_command import MAX_COMMAND_GAP_S, advance_command
 from waypoint_follower import (WaypointFollower, CONTROL_HZ, MAX_YAW_RATE,
@@ -193,7 +193,7 @@ class MpcFollower(WaypointFollower):
         # a person pass is gathered". This profile cannot take that pass and
         # has no rectangle-aware rollout to close on one safely, so it holds
         # exactly where WAIT used to put it.
-        if decision in (APPROACH, WAIT, PERSON_BYPASS):
+        if decision in (APPROACH, WAIT):
             self.publish_state("HOLD:MPC_WAIT")
             self.mpc_status = "WAIT"
             self.send_stop()

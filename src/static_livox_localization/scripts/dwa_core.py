@@ -231,6 +231,26 @@ W_ROUTE_DEVIATION = 25.0
 # authoritative chair-centre region. Outside it is never selectable, and
 # the last 0.5 m inside it gets progressively more expensive.
 W_MASK_BOUNDARY = 3.0
+# Which way to go round something, when both ways are admissible.
+#
+# W_CENTRE prefers the middle of the corridor, normalised by its half width,
+# so it says how far off centre an arc is but not how many metres of band are
+# actually on each side. Faced with an object on the line it therefore scores
+# a 0.6 m step into a 0.7 m shoulder much like a 0.6 m step into a 2.5 m one,
+# and picks between them on path cost and progress - which is how the chair
+# ends up committing to the tighter side and then having nowhere to finish.
+#
+# This adds the absolute room, in metres, that a rollout leaves itself
+# against the nearer band edge where it ends up. It is scaled by how hard an
+# obstacle is pressing, so it is exactly zero on open road and cannot pull
+# the chair off the recorded line when there is nothing to go round.
+W_ROOM = 1.5
+# Past this there is enough room either way and more is not worth more.
+ROOM_REWARD_CAP_M = 1.0
+# Over what clearance the preference fades in. Wider than the obstacle
+# penalty, because the side has to be chosen while there is still room to
+# choose - by the time the penalty is biting, the arc is committed.
+ROOM_PRESSURE_RANGE_M = 2.0
 
 # Extra room a candidate must keep OUTSIDE the chair's own padded rectangle.
 #
@@ -557,6 +577,17 @@ class DwaPlanner:
         edge = np.abs(lateral - (hi + lo) / 2.0) / half
         centre = np.square(np.minimum(edge, 1.0)).reshape(
             len(pairs), self.steps).mean(axis=1)
+        # Metres to the nearer band edge where each rollout ENDS - the
+        # point at which it has committed to a side - rewarded in
+        # proportion to how hard something is pushing it off the line.
+        room_end = np.minimum(
+            (hi - lateral).reshape(len(pairs), self.steps)[:, -1],
+            (lateral - lo).reshape(len(pairs), self.steps)[:, -1])
+        room = np.clip(room_end, 0.0, ROOM_REWARD_CAP_M)
+        pressure = np.clip(
+            (ROOM_PRESSURE_RANGE_M - clear) / ROOM_PRESSURE_RANGE_M,
+            0.0, 1.0)
+        room_reward = np.where(np.isfinite(clear), pressure, 0.0) * room
         overflow = np.maximum(lo - lateral, 0.0) + \
             np.maximum(lateral - hi, 0.0)
         escaped = (~band_inside).reshape(
@@ -576,6 +607,7 @@ class DwaPlanner:
                 + W_PATH * path_cost + W_ROUTE_DEVIATION * route_deviation
                 + W_HEADING * aim - W_PROGRESS * progress
                 + W_OBSTACLE * penalty + W_STEER * steer + W_CENTRE * centre
+                - W_ROOM * room_reward
                 + band_escape + W_MASK_BOUNDARY * mask_boundary)
         cost = np.where(ok, cost, np.inf)
         best = int(np.argmin(cost))

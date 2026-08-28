@@ -380,7 +380,7 @@ def test_stationary_person_is_watched_from_plan_ahead_before_bypass(
 
     assert len(follower.planner.calls) == 51
     assert follower.planner.calls[-1]["obstacles"]
-    assert follower.avoidance_state == cg.PERSON_BYPASS
+    assert follower.avoidance_state == cg.GO_ROUND
 
 
 def test_one_static_frame_after_long_motion_does_not_authorize_bypass(
@@ -796,9 +796,9 @@ def test_both_replacement_profiles_ask_the_shared_policy(monkeypatch):
             "%s must apply the shared person-stop hysteresis" % name
         if name == "dwa_follower":
             assert "decision == WAIT" in text
-            assert "GO_ROUND, PERSON_BYPASS" in text
+            assert "GO_ROUND, APPROACH" in text
         else:
-            assert "decision in (APPROACH, WAIT, PERSON_BYPASS)" in text, \
+            assert "decision in (APPROACH, WAIT)" in text, \
                 "mpc must hold for an approach it cannot finish"
         assert "avoidance_decision(" not in text, \
             "%s must not re-implement the decision" % name
