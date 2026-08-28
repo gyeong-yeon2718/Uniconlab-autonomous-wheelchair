@@ -106,7 +106,7 @@ class RtxPointPillarsNode {
     private_nh_.param("require_rtx2060", require_rtx2060_, true);
     private_nh_.param("max_cloud_age_s", max_cloud_age_s_, 0.50);
     private_nh_.param("max_inference_ms", max_inference_ms_, 90.0);
-    private_nh_.param("minimum_points", minimum_points_, 800);
+    private_nh_.param("minimum_points", minimum_points_, 350);
     private_nh_.param("max_points", max_points_, 300000);
     private_nh_.param("normalize_livox_intensity", normalize_intensity_, true);
     private_nh_.param("car_score_threshold", car_threshold_, 0.45);
@@ -463,7 +463,10 @@ class RtxPointPillarsNode {
   int gpu_device_ = 0;
   int compute_major_ = 0;
   int compute_minor_ = 0;
-  int minimum_points_ = 800;
+  // Matches config/pointpillars_rtx2060.yaml. A fallback that disagrees
+  // with the shipped config is how a value that only ever existed in one
+  // deploy directory came to look like the default.
+  int minimum_points_ = 350;
   int max_points_ = 300000;
   bool require_rtx2060_ = true;
   bool normalize_intensity_ = true;

@@ -14,7 +14,22 @@ require_rtx2060: true
 # 300k points. The ROS node rejects incompatible inputs instead of silently
 # resizing the network geometry.
 max_points: 300000
-minimum_points: 800
+# Below this the node returns TOO_FEW_POINTS and publishes NOTHING, so after
+# learned_max_age_s (1.0 s) of sparse scans the fused summary goes
+# LEARNED_STALE - and with REQUIRE_LEARNED=true that is status "blocked",
+# which the semantic supervisor reads as PERCEPTION_UNUSABLE and stops the
+# chair. A learned detector that skips a frame must not be a stop.
+#
+# 800 is the value this file has always carried and it is too high for a
+# MID-360 on this route. It was already known: the NUC has been running
+# wheelchair_deploys/main-b2c36ae-20260827/pointpillars_rtx2060_min350.yaml
+# since 2026-08-27 20:35, identical to this file except for this one line,
+# and with it the 2026-08-27 night drive saw LEARNED_STALE on 12 of 9,874
+# fused summaries. That file was never committed and exists in exactly one
+# directory, so every tree run since - all five under ~/unicon-field-tests
+# and ~/wheelchair_localization_src - went back to 800 and the stale
+# verdict came back with it.
+minimum_points: 350
 max_cloud_age_s: 0.50
 max_inference_ms: 90.0
 normalize_livox_intensity: true

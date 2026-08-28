@@ -169,6 +169,48 @@ geometric이고 152개만 PointPillars입니다.
 2026-08-27 그래프를 그대로 부를 수 있고, 지도 차감을 끈 이유(지도에 있는 벽에
 붙어 선 사람이 벽과 함께 차감될 수 있다)도 여전히 유효합니다.
 
+## 6. LEARNED_STALE — 커밋된 적 없던 수정
+
+`minimum_points` 아래로 포인트가 적으면 rtx 노드가 `TOO_FEW_POINTS`로 조기
+리턴하고 **아무것도 발행하지 않습니다**. 그러면 학습 요약이 늙어서 fusion이
+`LEARNED_STALE`을 내고, `REQUIRE_LEARNED=true`면 그게 곧 `status=blocked` →
+시맨틱 감독자가 `PERCEPTION_UNUSABLE`로 읽고 → 휠체어가 섭니다.
+
+**여유는 1.0초가 아니라 0.40초입니다.** `learned_max_age_s`는 1.0이지만
+`maximum_skew_s = 0.40`이 geometric 스탬프 기준으로 먼저 걸립니다. 즉 5 Hz에서
+**두 프레임**만 건너뛰어도 걸리고, `STAMP_SKEW`와 `STALE`은 동일하게 차단합니다.
+2026-08-27 주행에 둘 다 나옵니다: 9,874개 fused 요약 중 STALE 12 / STAMP_SKEW 6,
+둘 다 00:05:54에 시작.
+
+**수정은 커밋된 적이 없습니다.** NUC은 2026-08-27 20:35부터
+`wheelchair_deploys/main-b2c36ae-20260827/pointpillars_rtx2060_min350.yaml`로
+돌고 있었고, 이 파일은 레포의 `pointpillars_rtx2060.yaml`과 **딱 한 줄**
+(`minimum_points: 350` vs `800`) 빼고 동일합니다. 그 파일은 그 디렉터리 하나에만
+존재합니다 — `find ~ -name "pointpillars*min350*"` 결과가 1건입니다.
+
+그래서 그 이후 체크아웃한 트리는 전부 800으로 되돌아갔습니다:
+
+```
+~/unicon-field-tests/46d17de1.../repo   minimum_points: 800
+~/unicon-field-tests/778673a9.../repo   minimum_points: 800
+~/unicon-field-tests/a3bc1c96.../repo   minimum_points: 800
+~/unicon-field-tests/ef1ce046.../repo   minimum_points: 800
+~/unicon-field-tests/fe86c0d7.../repo   minimum_points: 800
+~/wheelchair_localization_src            (config 파일 자체가 없음)
+```
+
+`db6b814`에는 이 수정이 없습니다. 배포본 `b2c36ae` 대비 그 커밋의 diff는
+deliverables(pptx/png), docs, output 산출물, cohan_shadow 설정, `.gitignore`,
+경로계획 도구뿐이고 `hybrid_perception.py` / `hybrid_object_fusion.py` /
+PointPillars 설정 / 런처는 **한 줄도 건드리지 않습니다**.
+
+이 브랜치는 350을 레포 설정과 C++ 기본값 양쪽에 넣었습니다(둘이 어긋나 있던 게
+한 디렉터리에만 있던 값이 기본값처럼 보이게 된 원인입니다).
+
+그리고 `PERCEPTION_PROFILE=legacy_geometric`에서는 `START_POINTPILLARS=false` →
+`REQUIRE_LEARNED=false`라 **이 실패가 애초에 바퀴까지 도달하지 못합니다.**
+학습 소스가 늙어도 geometric 단독으로 계속 갑니다.
+
 ## 현장에서 돌리는 법
 
 ```bash
