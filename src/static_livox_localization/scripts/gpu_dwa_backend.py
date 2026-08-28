@@ -207,7 +207,19 @@ def make_gpu_planner(base_class, core_module):
                 pass
 
         def plan(self, state, obstacles=(), speed_cap=None,
-                 last_yaw_rate=0.0, last_speed=None):
+                 last_yaw_rate=0.0, last_speed=None,
+                 obstacle_floor_m=None):
+            """Same contract as the CPU planner, including the floor.
+
+            This body is a copy of DwaPlanner.plan with the obstacle and route
+            queries offloaded, and a copy drifts. It did: dwa_follower has
+            passed obstacle_floor_m since 2026-08-27 and this signature never
+            grew it, so every cycle on the RTX backend - the field default -
+            raised TypeError before reaching the wheels. The person-bypass
+            berth it carries was equally unreachable.
+            """
+            if obstacle_floor_m is None:
+                obstacle_floor_m = core_module.OBSTACLE_FLOOR_M
             cap = self.max_speed if speed_cap is None else min(
                 self.max_speed, float(speed_cap))
             pairs = [
@@ -239,12 +251,21 @@ def make_gpu_planner(base_class, core_module):
                     watched = self._obstacle_paths(
                         paths, span, core_module.OBSTACLE_PREVIEW_M)
                     flat_watched = watched[:, :, :2].reshape(-1, 2)
+                    # The backend is the prefilter, not the verdict. It answers
+                    # "which returns can any rollout centre reach"; the shape
+                    # question - does the chair's padded rectangle sweep
+                    # through one - is the same numpy reduction the CPU
+                    # planner runs, so the two cannot disagree about geometry
+                    # while disagreeing only about where the work happened.
                     distance, _ = self.distance_backend.obstacle_query(
                         flat_watched, points)
-                    clear = distance.reshape(len(pairs), -1).min(axis=1)
+                    clear = core_module.footprint_clearance(
+                        watched, points,
+                        distance.reshape(len(pairs), -1),
+                        float(obstacle_floor_m))
                 else:
                     clear = np.full(len(pairs), np.inf)
-                ok &= clear >= core_module.OBSTACLE_FLOOR_M
+                ok &= clear >= float(obstacle_floor_m)
                 if not ok.any():
                     return 0.0, 0.0, "OBSTACLE"
                 # Route lookup stays on the exact reference cKDTree contract.
@@ -261,7 +282,11 @@ def make_gpu_planner(base_class, core_module):
             ends = self.tree.query(paths[:, -1, :2])[1]
             progress = self.arc[ends] - here
             penalty = np.where(
-                np.isfinite(clear), np.maximum(0.0, 1.0 - clear), 0.0)
+                np.isfinite(clear),
+                np.maximum(0.0,
+                           core_module.OBSTACLE_PENALTY_RANGE_M - clear)
+                / core_module.OBSTACLE_PENALTY_RANGE_M,
+                0.0)
             reference_heading = self.heading[index].reshape(
                 len(pairs), self.steps)
             aim = np.abs(np.arctan2(

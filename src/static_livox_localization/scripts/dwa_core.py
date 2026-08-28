@@ -42,8 +42,18 @@ execute.
 """
 
 import math
+import os
+import sys
 
 import numpy as np
+
+# motion_safety is a sibling and carries no rospy. dwa_core is imported both
+# from nodes that have already put this directory on the path and from desk
+# tests that have not, so put it there rather than depend on the caller.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import motion_safety as motion_safety_geometry  # noqa: E402
+from motion_safety import footprint_clearance  # noqa: E402
 
 # The follower's constants. Kept literal rather than imported because
 # waypoint_follower pulls in rospy and this has to stay testable at a desk.
@@ -130,6 +140,15 @@ YAW_SAMPLES = 21
 W_PATH = 3.3
 W_PROGRESS = 1.0
 W_OBSTACLE = 2.0
+# Over how much clearance the obstacle penalty is spread. It used to be
+# "1.0 m from the rollout centre", which was 0.2 - 0.55 m outside the chair
+# depending on which way it was pointing. Now that clear is measured from the
+# footprint edge the same physical band is a single number, and the penalty
+# stays normalised to 0..1 so W_OBSTACLE keeps its meaning.
+OBSTACLE_PENALTY_RANGE_M = 0.55
+# Re-exported so gpu_dwa_backend, which mirrors plan(), reaches the same
+# geometry through core_module rather than importing a second copy.
+footprint_clearance = footprint_clearance
 
 # Where the chair is POINTED, not only where it stands. Measured from the two
 # runs on 2026-08-08: without this term the score is a position-only cost, and
@@ -213,18 +232,35 @@ W_ROUTE_DEVIATION = 25.0
 # the last 0.5 m inside it gets progressively more expensive.
 W_MASK_BOUNDARY = 3.0
 
-# A candidate whose rollout passes closer than this to a tracked object is
-# discarded outright rather than scored - the same floor mpc_core keeps.
-# Matched to safety_gate's own veto geometry, not chosen independently.
-# The gate hard-stops for any obstacle point inside a HALF_WIDTH_M = 0.50 m
-# forward corridor within the stopping envelope. At 0.40 the planner would
-# happily propose a path threading a 0.45 m gap that the gate then refuses,
-# and because refusing does not move the chair the next cycle proposes it
-# again. That is the second entrance to the 2026-08-23 motorcycle deadlock:
-# the nearest surface of it sat 0.47 m off the centreline - clear to the
-# planner, a stop to the gate. A planner must not propose what the gate
-# forbids; where they disagree the chair simply stands still.
-OBSTACLE_FLOOR_M = 0.50
+# Extra room a candidate must keep OUTSIDE the chair's own padded rectangle.
+#
+# Until 2026-08-28 this was a 0.50 m disc measured from the rollout centre,
+# described as "matched to safety_gate's own veto geometry". Only the half
+# width was ever matched. The gate protects a rectangle that rotates with the
+# chair - hypot(FRONT + MARGIN, HALF_WIDTH + MARGIN) = 0.79 m to the corner -
+# so a hard turn swept 0.29 m of chair through space the planner had scored
+# as clear. Measured on the 2026-08-28 00:11 drive: a static person 1.05 m
+# ahead and 0.03 m off the centreline, the planner saturated at +0.50 rad/s
+# for ten seconds, and the gate returned REQUESTED_PATH_COLLISION 130 times.
+# The chair never moved and nothing in either log said the two were using
+# different shapes.
+#
+# Now the rectangle is shared (motion_safety.footprint_exterior_distance) and
+# this is the clearance beyond it, so the number means what it says: room to
+# spare, not a radius that happens to include the vehicle.
+# What this test used to be: a disc of this radius about the rollout centre,
+# equal to safety_gate.HALF_WIDTH_M so the planner could not propose a path
+# through the gate's forward corridor.
+LEGACY_OBSTACLE_DISC_M = 0.50
+# Derived, not chosen, so the side clearance survives a change to the
+# footprint: rectangle plus floor is still the 0.50 m the disc kept beside
+# the chair, and nothing the planner used to accept there is newly refused.
+# What IS newly refused is what a disc cannot express - 0.70 m ahead rather
+# than 0.50, and a corner reaching 0.79 m under yaw.
+OBSTACLE_FLOOR_M = round(
+    LEGACY_OBSTACLE_DISC_M
+    - (motion_safety_geometry.FOOTPRINT_HALF_WIDTH_M
+       + motion_safety_geometry.SWEEP_MARGIN_M), 6)
 
 
 def speed_samples(max_speed=MAX_SPEED, floor=TURN_FLOOR_SPEED,
@@ -476,8 +512,15 @@ class DwaPlanner:
             # for a crowded frame.
             from scipy.spatial import cKDTree
             flat_watched = watched[:, :, :2].reshape(-1, 2)
+            # The KD-tree still answers the cheap question - how far is the
+            # nearest return from each rollout CENTRE - exactly as it did
+            # when that distance was the whole verdict. footprint_clearance
+            # turns it into a bound on the rectangle and only pays for the
+            # oriented test where the bound cannot decide.
             distance, _ = cKDTree(pts).query(flat_watched, workers=-1)
-            clear = distance.reshape(len(pairs), -1).min(axis=1)
+            clear = footprint_clearance(
+                watched, pts, distance.reshape(len(pairs), -1),
+                float(obstacle_floor_m))
         else:
             clear = np.full(len(pairs), np.inf)
         ok &= clear >= float(obstacle_floor_m)
@@ -490,7 +533,11 @@ class DwaPlanner:
         here = self.arc_at(state[:2])
         ends = self.tree.query(paths[:, -1, :2])[1]
         progress = self.arc[ends] - here
-        penalty = np.where(np.isfinite(clear), np.maximum(0.0, 1.0 - clear), 0.0)
+        penalty = np.where(
+            np.isfinite(clear),
+            np.maximum(0.0, OBSTACLE_PENALTY_RANGE_M - clear)
+            / OBSTACLE_PENALTY_RANGE_M,
+            0.0)
         # How far off the corridor's own direction each arc leaves the chair,
         # averaged over the rollout. The route indices come free from the
         # path-distance query above.

@@ -43,7 +43,9 @@ from body_frame import CHAIR_CENTRE_IN_BODY_XYZ, lidar_extrinsics
 from cloud_points import (COLLISION_MAX_HEIGHT_M,
                           COLLISION_MIN_HEIGHT_M)
 from drive_policy import announce
-from motion_safety import (MotionEstimate, PoseMotionEstimator,
+from motion_safety import (FOOTPRINT_FRONT_M, FOOTPRINT_HALF_WIDTH_M,
+                           FOOTPRINT_REAR_M, MotionEstimate,
+                           PoseMotionEstimator, SWEEP_MARGIN_M,
                            filter_obstacle_points,
                            ground_reference, motion_hold_reason,
                            stopping_envelope,
@@ -89,10 +91,9 @@ MIN_BRAKE_DECEL_MPS2 = 0.5
 MIN_YAW_DECEL_RPS2 = 0.5
 GEOMETRY_MARGIN_M = 0.9
 FORWARD_CHECK_EXTRA_M = 0.6
-FOOTPRINT_FRONT_M = 0.50
-FOOTPRINT_REAR_M = 0.50
-FOOTPRINT_HALF_WIDTH_M = 0.30
-SWEEP_MARGIN_M = 0.15
+# FOOTPRINT_*/SWEEP_MARGIN_M now come from motion_safety, so the planner can
+# clear the same rectangle this gate vetoes instead of a disc it chose itself.
+# Imported above; still readable as safety_gate.FOOTPRINT_* by every caller.
 RIDER_EXCLUDE_X_MIN_M = -1.0
 RIDER_EXCLUDE_X_MAX_M = 0.55
 RIDER_EXCLUDE_HALF_WIDTH_M = 0.40

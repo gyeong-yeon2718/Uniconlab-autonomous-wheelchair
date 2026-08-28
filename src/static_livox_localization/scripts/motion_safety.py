@@ -441,6 +441,161 @@ def filter_obstacle_points(
     return points[keep, :2]
 
 
+# The chair's protected rectangle, and the margin the raw gate adds to it.
+#
+# These lived in safety_gate alone until 2026-08-28, and dwa_core kept its own
+# scalar OBSTACLE_FLOOR_M "matched to safety_gate's own veto geometry". Only
+# the half width was ever matched. The gate protects a RECTANGLE that rotates
+# with the chair, whose corner sits at hypot(0.65, 0.45) = 0.79 m from centre;
+# the planner was clearing a 0.50 m disc. On the 2026-08-28 00:11 drive that
+# 0.29 m of unmodelled corner produced 130 REQUESTED_PATH_COLLISION refusals
+# in ten seconds while the planner sat at max yaw believing it was clear.
+#
+# One definition, imported by both. A planner must not propose what the gate
+# forbids, and it cannot honour a shape it does not know.
+FOOTPRINT_FRONT_M = 0.50
+FOOTPRINT_REAR_M = 0.50
+FOOTPRINT_HALF_WIDTH_M = 0.30
+SWEEP_MARGIN_M = 0.15
+
+
+def footprint_circumscribed_radius(front_m=FOOTPRINT_FRONT_M,
+                                   rear_m=FOOTPRINT_REAR_M,
+                                   half_width_m=FOOTPRINT_HALF_WIDTH_M,
+                                   margin_m=SWEEP_MARGIN_M):
+    """Distance from chair centre to the far corner of the padded rectangle."""
+    return math.hypot(max(float(front_m), float(rear_m)) + float(margin_m),
+                      float(half_width_m) + float(margin_m))
+
+
+def footprint_inscribed_radius(front_m=FOOTPRINT_FRONT_M,
+                               rear_m=FOOTPRINT_REAR_M,
+                               half_width_m=FOOTPRINT_HALF_WIDTH_M,
+                               margin_m=SWEEP_MARGIN_M):
+    """Distance from chair centre to the nearest edge of the padded box."""
+    return min(float(front_m) + float(margin_m),
+               float(rear_m) + float(margin_m),
+               float(half_width_m) + float(margin_m))
+
+
+def footprint_clearance(poses_xytheta, points_xy, centre_distance, floor_m,
+                        front_m=FOOTPRINT_FRONT_M,
+                        rear_m=FOOTPRINT_REAR_M,
+                        half_width_m=FOOTPRINT_HALF_WIDTH_M,
+                        margin_m=SWEEP_MARGIN_M):
+    """Per-candidate clearance, exact only where the verdict could turn on it.
+
+    ``centre_distance`` is (candidates, steps): the distance from each rollout
+    centre to its nearest obstacle return, which the caller already has from
+    the KD-tree or the GPU backend. From it, two bounds hold for every point
+    p, because the padded rectangle contains its inscribed disc and is
+    contained by its circumscribed one::
+
+        centre(p) - circumscribed  <=  exterior(p)  <=  centre(p) - inscribed
+
+    So a candidate whose nearest centre distance clears the floor even after
+    subtracting the CORNER is admissible, and one that fails the floor even
+    after subtracting only the nearest EDGE is not, and neither needs the
+    (candidates x steps x points) reduction. Only the band between them does.
+
+    That band is what keeps this inside the control period. The exact test is
+    correct but quadratic, and on 2026-08-28 running it unconditionally cost
+    1454 ms against 8 ms for 20,000 returns - test_obstacle_preview measures
+    exactly this and caught it. In an ordinary scene almost every candidate is
+    decided by a bound; in a dense one almost every candidate is refused by
+    one, which is the case that used to be slowest.
+
+    The clearance returned for a bounded candidate is its LOWER bound, never
+    the true value: it feeds an obstacle penalty, and a penalty that
+    understates room is conservative in the same direction as the floor.
+    """
+    poses = np.asarray(poses_xytheta, dtype=float)
+    centre = np.asarray(centre_distance, dtype=float)
+    if poses.ndim != 3 or poses.shape[2] != 3:
+        raise MotionSafetyInputError("poses must have shape (N, steps, 3)")
+    if centre.shape[0] != poses.shape[0]:
+        raise MotionSafetyInputError("centre_distance must be per candidate")
+    pts = np.asarray(points_xy, dtype=float).reshape(-1, 2)
+    if not len(pts):
+        return np.full(len(poses), np.inf)
+    circumscribed = footprint_circumscribed_radius(
+        front_m, rear_m, half_width_m, margin_m)
+    inscribed = footprint_inscribed_radius(
+        front_m, rear_m, half_width_m, margin_m)
+    nearest = centre.reshape(len(poses), -1).min(axis=1)
+    lower = np.maximum(0.0, nearest - circumscribed)
+    upper = np.maximum(0.0, nearest - inscribed)
+    floor_m = float(floor_m)
+    uncertain = (lower < floor_m) & (upper >= floor_m)
+    # ``upper`` decides the refusal but is never REPORTED: it is an upper
+    # bound on the true clearance, so returning it would tell the scorer
+    # there is more room than the oriented test would find. Every reported
+    # value is the lower bound, or the exact answer where that bound could
+    # not decide. Understating room is conservative in the same direction as
+    # the floor; overstating it is how the planner starts proposing what the
+    # gate refuses again, by a different route.
+    clearance = lower.copy()
+    if uncertain.any():
+        # Only these candidates, and only the returns any of them can reach.
+        reach = circumscribed + floor_m
+        subset = poses[uncertain]
+        flat = subset[:, :, :2].reshape(-1, 2)
+        # A bounding box rather than a distance: it is O(points) with no
+        # intermediate the size of points x poses, and being a superset of
+        # the returns that matter costs only a slightly larger exact stage.
+        low = flat.min(axis=0) - reach
+        high = flat.max(axis=0) + reach
+        near = pts[np.all((pts >= low) & (pts <= high), axis=1)]
+        if len(near):
+            clearance[uncertain] = footprint_exterior_distance(
+                subset, near, front_m, rear_m, half_width_m, margin_m)
+        else:
+            clearance[uncertain] = np.inf
+    return clearance
+
+
+def footprint_exterior_distance(poses_xytheta, points_xy,
+                                front_m=FOOTPRINT_FRONT_M,
+                                rear_m=FOOTPRINT_REAR_M,
+                                half_width_m=FOOTPRINT_HALF_WIDTH_M,
+                                margin_m=SWEEP_MARGIN_M):
+    """Closest approach of each swept rectangle to any point, in metres.
+
+    ``poses_xytheta`` is (candidates, steps, 3) in the same world frame as
+    ``points_xy``. The return is (candidates,): zero where a point lies inside
+    the padded rectangle at any step, otherwise the smallest gap to it.
+
+    This is the planner-side twin of :func:`swept_footprint_collision`. That
+    one answers "does this collide" for one committed command and integrates
+    the arc itself; this one answers "how much room does each candidate keep"
+    over rollouts the planner has already integrated, and it has to be cheap
+    enough to run on all of them.
+    """
+    poses = np.asarray(poses_xytheta, dtype=float)
+    if poses.ndim != 3 or poses.shape[2] != 3:
+        raise MotionSafetyInputError("poses must have shape (N, steps, 3)")
+    pts = np.asarray(points_xy, dtype=float).reshape(-1, 2)
+    if not len(pts):
+        return np.full(len(poses), np.inf)
+    front = float(front_m) + float(margin_m)
+    rear = float(rear_m) + float(margin_m)
+    side = float(half_width_m) + float(margin_m)
+    if min(front, rear, side) < 0.0:
+        raise MotionSafetyInputError("footprint extents must be non-negative")
+    # (candidates, steps, points, 2) is the honest shape of this question, and
+    # it is affordable only because the caller has already dropped every point
+    # that no rollout comes near. Keep that contract: the whole scan through
+    # here would be tens of millions of entries.
+    delta = pts[None, None, :, :] - poses[:, :, None, :2]
+    cos = np.cos(poses[:, :, 2])[:, :, None]
+    sin = np.sin(poses[:, :, 2])[:, :, None]
+    local_x = delta[:, :, :, 0] * cos + delta[:, :, :, 1] * sin
+    local_y = -delta[:, :, :, 0] * sin + delta[:, :, :, 1] * cos
+    over_x = np.maximum(np.maximum(local_x - front, -rear - local_x), 0.0)
+    over_y = np.maximum(np.abs(local_y) - side, 0.0)
+    return np.hypot(over_x, over_y).min(axis=(1, 2))
+
+
 def swept_footprint_collision(
         points_xy: np.ndarray,
         linear_speed_mps: float,

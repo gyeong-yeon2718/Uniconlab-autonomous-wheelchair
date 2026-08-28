@@ -96,10 +96,33 @@ def test_the_planner_may_not_propose_what_the_gate_hard_stops():
     """The second entrance to the same deadlock.
 
     safety_gate stops for any obstacle point inside a 0.50 m forward
-    corridor. A planner clearance floor below that admits paths the gate
-    refuses, and the chair stands still while both are behaving correctly.
+    corridor. A planner clearance below that admits paths the gate refuses,
+    and the chair stands still while both are behaving correctly.
+
+    Compared as a distance from the chair CENTRE, which is what the gate's
+    corridor is measured from. Until 2026-08-28 the planner's floor was such
+    a distance and could be compared directly; it is now clearance outside
+    the padded rectangle, and that rectangle already spans 0.45 m of the
+    0.50. Comparing the raw constants after that change tests nothing.
     """
-    assert dwa_core.OBSTACLE_FLOOR_M >= safety_gate.HALF_WIDTH_M
+    lateral = (safety_gate.FOOTPRINT_HALF_WIDTH_M
+               + safety_gate.SWEEP_MARGIN_M
+               + dwa_core.OBSTACLE_FLOOR_M)
+    # Equal by construction, so the comparison has to tolerate the binary
+    # representation of 0.30 + 0.15 + 0.05 rather than fail on it.
+    assert lateral >= safety_gate.HALF_WIDTH_M - 1e-9
+
+
+def test_the_planner_also_clears_the_swept_body_the_gate_vetoes():
+    """The half width was the only part of the gate's geometry the planner
+    ever matched. It vetoes a rotating rectangle, whose corner reaches
+    further than any forward corridor, and on 2026-08-28 that unmodelled
+    0.29 m returned REQUESTED_PATH_COLLISION 139 times in one drive."""
+    assert dwa_core.footprint_clearance is not None
+    forward = (safety_gate.FOOTPRINT_FRONT_M + safety_gate.SWEEP_MARGIN_M
+               + dwa_core.OBSTACLE_FLOOR_M)
+    assert forward > safety_gate.HALF_WIDTH_M, (
+        "the planner still keeps less room ahead than beside")
 
 
 def test_it_goes_round_the_motorcycle_instead_of_standing_in_front_of_it(
