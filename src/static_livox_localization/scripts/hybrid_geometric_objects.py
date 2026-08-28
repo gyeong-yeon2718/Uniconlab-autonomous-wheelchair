@@ -24,6 +24,18 @@ import rospy
 import obstacle_clusters as legacy
 
 
+def _bool_param(name, default):
+    value = rospy.get_param("~" + name, default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "1", "yes"):
+        return True
+    if text in ("false", "0", "no"):
+        return False
+    raise rospy.ROSInitException("~%s must be true or false" % name)
+
+
 class KeepAllGeometry(object):
     """Drop-in replacement for FixedMapFilter used only in this process."""
 
@@ -48,10 +60,37 @@ def _positive_int(name, default):
 
 
 def main():
-    # ObstacleClusters constructs the filter in __init__. Replace the class
-    # before construction so the 500+ MB map is not loaded into a second
-    # KD-tree merely to be ignored afterwards.
-    legacy.FixedMapFilter = KeepAllGeometry
+    # Fixed-map subtraction: on by default since 2026-08-28.
+    #
+    # Turning it off (2026-08-27, "keep mapped geometry visible to the
+    # avoidance planner") made every mapped surface - walls, kerbs, posts,
+    # the scenery the prior map exists to describe - arrive as a fresh
+    # object every scan. Measured inside one drive, on the same route and
+    # the same sensor, across the 2026-08-28 00:04:02 producer swap:
+    #
+    #   subtraction ON  (obstacle_clusters): mean 1.73 objects/frame,
+    #                                        p99 5, max 7, never 8 or more
+    #   subtraction OFF (this node):         mean 5.05, p99 16, max 23,
+    #                                        16 % of frames at 8 or more
+    #
+    # That is 2.9x the objects from unchanged surroundings, and it is what
+    # "obstacles appear where there are none, and one or two become eleven"
+    # is. It is not the learned detector: of 49,818 objects published after
+    # the swap, 49,666 were geometric and 152 came from PointPillars.
+    #
+    # The reason it was turned off is still real - a person standing against
+    # a mapped wall can be subtracted along with the wall - so this stays a
+    # parameter. It is not the default, because a producer that reports the
+    # whole world as novel gives the avoidance layer nothing to avoid.
+    if _bool_param("fixed_map_subtraction", True):
+        rospy.loginfo(
+            "hybrid geometry: fixed-map subtraction is ON; mapped surfaces "
+            "are not reported as objects")
+    else:
+        # ObstacleClusters constructs the filter in __init__. Replace the
+        # class before construction so the 500+ MB map is not loaded into a
+        # second KD-tree merely to be ignored afterwards.
+        legacy.FixedMapFilter = KeepAllGeometry
     node = legacy.ObstacleClusters()
 
     # Defaults preserve the field-tested clustering thresholds. They are ROS
@@ -67,11 +106,18 @@ def main():
         raise rospy.ROSInitException(
             "~min_cluster_points must be >= ~min_cell_points")
 
-    rospy.logwarn(
-        "hybrid geometry: fixed-map subtraction is OFF for collision and "
-        "avoidance; mapped surfaces remain visible (cell=%d cluster=%d max=%d)",
-        legacy.MIN_CELL_POINTS, legacy.MIN_CLUSTER_POINTS,
-        legacy.MAX_CLUSTERS)
+    if legacy.FixedMapFilter is KeepAllGeometry:
+        rospy.logwarn(
+            "hybrid geometry: fixed-map subtraction is OFF for collision and "
+            "avoidance; mapped surfaces remain visible "
+            "(cell=%d cluster=%d max=%d)",
+            legacy.MIN_CELL_POINTS, legacy.MIN_CLUSTER_POINTS,
+            legacy.MAX_CLUSTERS)
+    else:
+        rospy.loginfo(
+            "hybrid geometry: cell=%d cluster=%d max=%d",
+            legacy.MIN_CELL_POINTS, legacy.MIN_CLUSTER_POINTS,
+            legacy.MAX_CLUSTERS)
     node.spin()
 
 

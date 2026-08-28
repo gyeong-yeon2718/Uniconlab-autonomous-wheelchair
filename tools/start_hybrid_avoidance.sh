@@ -14,6 +14,16 @@ Default graph:
   -> terrain guard -> tip_guard -> wheelchair base
 
 Environment:
+  PERCEPTION_PROFILE=legacy_geometric|hybrid_experimental
+      legacy_geometric   (default) fixed-map subtraction ON, field-tested
+                         clustering thresholds, no learned detector. This is
+                         the obstacle detection the chair drove on before
+                         2026-08-27, running inside the hybrid graph so the
+                         chair_centre frame and object schema every consumer
+                         now requires are still produced.
+      hybrid_experimental  every non-ground return plus PointPillars. What
+                         ran on 2026-08-27; publishes 2.9x the objects.
+      Each setting below still wins if it is set explicitly.
   START_POINTPILLARS=true|false
   REQUIRE_LEARNED=true|false              # default follows START_POINTPILLARS
   PREFER_DWA_GPU=true|false
@@ -21,9 +31,10 @@ Environment:
   POINTPILLARS_ENV=~/.config/unicon/pointpillars.env
   POINTPILLARS_MODEL=/path/to/pointpillar.plan
   POINTPILLARS_REQUIRE_RTX2060=true|false
-  GEOMETRIC_MIN_CELL_POINTS=1             # preserve thin objects
-  GEOMETRIC_MIN_CLUSTER_POINTS=5          # match raw gate's 5-point floor
-  GEOMETRIC_MAX_CLUSTERS=80
+  GEOMETRIC_FIXED_MAP_SUBTRACTION=true|false
+  GEOMETRIC_MIN_CELL_POINTS               # 2 legacy / 1 experimental
+  GEOMETRIC_MIN_CLUSTER_POINTS            # 8 legacy / 5 experimental
+  GEOMETRIC_MAX_CLUSTERS                  # 40 legacy / 80 experimental
   CLIFF_REQUIRED=false|true
   CLIFF_TOPIC=/terrain/cliff_status
   SAFETY_POLICIES=true|false
@@ -49,12 +60,45 @@ BASE_START="${BASE_START:-$HOME/start_wheelchair_localization.sh}"
 [ -f "$LOCALIZATION_WS/devel/setup.bash" ] || \
   fail "localization workspace is not built: $LOCALIZATION_WS"
 
+# Perception profile. Only sets defaults; anything exported explicitly wins.
+#
+# The 2026-08-27 graph reported the mapped world as novel obstacles. Across
+# the producer swap inside the 2026-08-28 drive - same route, same sensor,
+# nineteen minutes apart - objects per frame went from mean 1.73 / max 7 to
+# mean 5.05 / max 23, and 16 % of frames carried eight or more. The learned
+# detector was not the cause: 49,666 of 49,818 published objects after the
+# swap were geometric. Two settings produce it, and both are rolled back
+# here rather than in the code, so a bag replay can still ask for either.
+PERCEPTION_PROFILE="${PERCEPTION_PROFILE:-legacy_geometric}"
+case "$PERCEPTION_PROFILE" in
+  legacy_geometric)
+    : "${START_POINTPILLARS:=false}"
+    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=true}"
+    # obstacle_clusters' own field-tested thresholds. The experimental
+    # profile halves them, which is what turns one object into several.
+    : "${GEOMETRIC_MIN_CELL_POINTS:=2}"
+    : "${GEOMETRIC_MIN_CLUSTER_POINTS:=8}"
+    : "${GEOMETRIC_MAX_CLUSTERS:=40}"
+    ;;
+  hybrid_experimental)
+    : "${START_POINTPILLARS:=true}"
+    : "${GEOMETRIC_FIXED_MAP_SUBTRACTION:=false}"
+    : "${GEOMETRIC_MIN_CELL_POINTS:=1}"
+    : "${GEOMETRIC_MIN_CLUSTER_POINTS:=5}"
+    : "${GEOMETRIC_MAX_CLUSTERS:=80}"
+    ;;
+  *)
+    fail "PERCEPTION_PROFILE must be legacy_geometric or hybrid_experimental"
+    ;;
+esac
+
 START_POINTPILLARS="${START_POINTPILLARS:-true}"
 PREFER_DWA_GPU="${PREFER_DWA_GPU:-true}"
 REQUIRE_GPU="${REQUIRE_GPU:-true}"
 POINTPILLARS_REQUIRE_RTX2060="${POINTPILLARS_REQUIRE_RTX2060:-true}"
 CLIFF_REQUIRED="${CLIFF_REQUIRED:-false}"
 SAFETY_POLICIES="${SAFETY_POLICIES:-true}"
+GEOMETRIC_FIXED_MAP_SUBTRACTION="${GEOMETRIC_FIXED_MAP_SUBTRACTION:-true}"
 if [ "${REQUIRE_LEARNED+x}" = x ]; then
   REQUIRE_LEARNED="$REQUIRE_LEARNED"
 else
@@ -66,15 +110,16 @@ for pair in "START_POINTPILLARS:$START_POINTPILLARS" \
             "REQUIRE_GPU:$REQUIRE_GPU" \
             "POINTPILLARS_REQUIRE_RTX2060:$POINTPILLARS_REQUIRE_RTX2060" \
             "CLIFF_REQUIRED:$CLIFF_REQUIRED" \
+            "GEOMETRIC_FIXED_MAP_SUBTRACTION:$GEOMETRIC_FIXED_MAP_SUBTRACTION" \
             "SAFETY_POLICIES:$SAFETY_POLICIES"; do
   name="${pair%%:*}"; value="${pair#*:}"
   case "$value" in true|false) ;; *) fail "$name must be true or false" ;; esac
 done
 [ "$REQUIRE_GPU" = "false" ] || PREFER_DWA_GPU=true
 
-GEOMETRIC_MIN_CELL_POINTS="${GEOMETRIC_MIN_CELL_POINTS:-1}"
-GEOMETRIC_MIN_CLUSTER_POINTS="${GEOMETRIC_MIN_CLUSTER_POINTS:-5}"
-GEOMETRIC_MAX_CLUSTERS="${GEOMETRIC_MAX_CLUSTERS:-80}"
+GEOMETRIC_MIN_CELL_POINTS="${GEOMETRIC_MIN_CELL_POINTS:-2}"
+GEOMETRIC_MIN_CLUSTER_POINTS="${GEOMETRIC_MIN_CLUSTER_POINTS:-8}"
+GEOMETRIC_MAX_CLUSTERS="${GEOMETRIC_MAX_CLUSTERS:-40}"
 for pair in "GEOMETRIC_MIN_CELL_POINTS:$GEOMETRIC_MIN_CELL_POINTS" \
             "GEOMETRIC_MIN_CLUSTER_POINTS:$GEOMETRIC_MIN_CLUSTER_POINTS" \
             "GEOMETRIC_MAX_CLUSTERS:$GEOMETRIC_MAX_CLUSTERS"; do
@@ -185,7 +230,11 @@ if pgrep -f '[d]wa_follower.py|[g]pu_dwa_follower.py|[o]bstacle_clusters.py|[r]t
 fi
 # safety_gate remains alive and fails closed while /cmd_vel_raw is absent.
 
-say "all non-ground collision geometry (mapped surfaces retained)"
+if [ "$GEOMETRIC_FIXED_MAP_SUBTRACTION" = "true" ]; then
+  say "collision geometry, mapped surfaces subtracted ($PERCEPTION_PROFILE)"
+else
+  say "all non-ground collision geometry, mapped surfaces retained ($PERCEPTION_PROFILE)"
+fi
 setsid nohup env $SINGLE_THREAD_ENV \
   rosrun static_livox_localization hybrid_geometric_objects.py \
   __name:=hybrid_geometric_objects \
@@ -193,6 +242,7 @@ setsid nohup env $SINGLE_THREAD_ENV \
   _safety_band:="$BAND" \
   _map_path:="$MAP" \
   _map_sha256:="$MAP_SHA256" \
+  _fixed_map_subtraction:="$GEOMETRIC_FIXED_MAP_SUBTRACTION" \
   _min_cell_points:="$GEOMETRIC_MIN_CELL_POINTS" \
   _min_cluster_points:="$GEOMETRIC_MIN_CLUSTER_POINTS" \
   _max_clusters:="$GEOMETRIC_MAX_CLUSTERS" \
