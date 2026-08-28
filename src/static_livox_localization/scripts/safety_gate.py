@@ -272,6 +272,28 @@ class SafetyGate:
         self.evidence["envelope_m"] = round(float(envelope.distance_m), 3)
         self.evidence["horizon_s"] = round(float(envelope.horizon_s), 3)
         self.evidence["obstacle_points"] = int(len(obstacles))
+        # Where the returns actually are, not just how many.
+        #
+        # OBSTACLE_SWEEP with sweep_clear_v 0 means the swept footprint
+        # collides even at a crawl - so a return is inside the chair's own
+        # rectangle - and until 2026-08-28 the status said only that 10,731
+        # points existed somewhere. That is not enough to tell a wall from
+        # the rider's knee from a mis-levelled ground plane, and the raw
+        # cloud is not in the blackbox, so the verdict could not be
+        # reproduced offline at all. Four numbers close that gap.
+        if len(obstacles):
+            inside = obstacles[
+                (obstacles[:, 0] >= -FOOTPRINT_REAR_M - SWEEP_MARGIN_M) &
+                (obstacles[:, 0] <= FOOTPRINT_FRONT_M + SWEEP_MARGIN_M) &
+                (np.abs(obstacles[:, 1]) <=
+                 FOOTPRINT_HALF_WIDTH_M + SWEEP_MARGIN_M)]
+            self.evidence["footprint_points"] = int(len(inside))
+            nearest = obstacles[
+                np.argmin(np.hypot(obstacles[:, 0], obstacles[:, 1]))]
+            self.evidence["nearest_xy"] = [round(float(nearest[0]), 3),
+                                           round(float(nearest[1]), 3)]
+            if obstacles.shape[1] > 2:
+                self.evidence["nearest_z"] = round(float(nearest[2]), 3)
         if len(obstacles):
             azimuth = np.abs(np.degrees(np.arctan2(
                 obstacles[:, 1], obstacles[:, 0])))

@@ -654,3 +654,38 @@ def test_the_room_preference_is_inert_with_nothing_to_go_round(tmp_path):
 
     assert status == "OK"
     assert abs(w) < 1e-9, "the band's asymmetry steered a clear corridor"
+
+
+def test_a_wall_alongside_does_not_steer_a_clear_corridor(tmp_path):
+    """The 2026-08-28 16:11 deadlock, as the scene that produced it.
+
+    W_ROOM was scaled by obstacle PRESSURE alone, and pressure is high
+    whenever anything is within ROOM_PRESSURE_RANGE_M - which beside a wall
+    is always. So the term fired on every cycle of ordinary driving and
+    pulled the chair toward the roomier side with nothing to go round.
+
+    Measured over that run: 7,126 left-turn requests against 26 right, a
+    constant +0.15 rad/s, and the raw gate refusing the resulting arc as
+    OBSTACLE_SWEEP on 59 % of samples. The chair held waypoint 42 for nine
+    minutes. The two runs before it, on another branch, asked for 187/51 and
+    204/202.
+
+    Preferring the wider side is for choosing which way round something.
+    Nothing is being gone round here: the corridor ahead is clear and the
+    wall is beside the chair, not in front of it.
+    """
+    band, route, planner = asymmetric_band_scene(
+        tmp_path, OpenDrivableMask(), 2.5, 0.7)
+    state = on_route(route, 4)
+    heading = np.array([math.cos(state[2]), math.sin(state[2])])
+    normal = np.array([-heading[1], heading[0]])
+    # A wall down the narrow side, level with the chair and behind it - never
+    # in the corridor it is about to drive through.
+    wall = [state[:2] + normal * -0.62 + heading * (0.3 * k - 1.5)
+            for k in range(8)]
+
+    v, w, status = planner.plan(state, obstacles=tuple(wall), last_speed=0.35)
+
+    assert status == "OK", status
+    assert abs(w) < 0.06, (
+        "a wall alongside steered a clear corridor by %+.2f rad/s" % w)
