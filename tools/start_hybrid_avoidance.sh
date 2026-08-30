@@ -401,8 +401,32 @@ for _ in $(seq 1 30); do
   fi
   sleep 1
 done
-[ "$READY" = "1" ] || \
+if [ "$READY" != "1" ]; then
+  # Name the one cause the operator can act on.
+  #
+  # "hybrid profile never became ready" is true of a broken graph and of a
+  # chair simply parked off the route, and those have nothing in common. On
+  # 2026-08-28 the second was read as the first twice: every node was up and
+  # healthy, and the chair sat 70 m from waypoint 0, outside the drivable
+  # mask, facing 160 degrees away from the route. No command can leave such a
+  # position without leaving the mask, so terrain_guard holds MASK_BOUNDARY
+  # forever and the wait can only time out.
+  LAST_HOLD="$(rostopic echo -n 1 /terrain_guard/status 2>/dev/null |
+    grep -oE 'MASK_BOUNDARY|POSE_STALE|INPUT_STALE|WHEEL_STALE' | head -1)"
+  if [ "$LAST_HOLD" = "MASK_BOUNDARY" ]; then
+    echo "" >&2
+    echo "NOT READY: the chair is not on the drivable route." >&2
+    echo "  terrain_guard holds MASK_BOUNDARY - every rollout of the" >&2
+    echo "  commanded motion leaves the drivable mask, which is what being" >&2
+    echo "  parked off the corridor looks like. Being inside the point-cloud" >&2
+    echo "  MAP is not the same thing: the mask is the route corridor only." >&2
+    echo "" >&2
+    echo "  Where it is:  python3 $REPO_ROOT/tools/where_am_i.py" >&2
+    echo "  Move the chair onto the route, then press the bring-up again." >&2
+    fail "chair is off the drivable route (terrain_guard MASK_BOUNDARY)"
+  fi
   fail "hybrid profile never became ready; inspect live_hybrid_*.log"
+fi
 
 mkdir -p "$HOME/localization_trials"
 RECORD_TOPICS=(
