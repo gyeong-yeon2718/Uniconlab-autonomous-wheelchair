@@ -136,6 +136,268 @@ ROUTE_MAX_POINTS = 400
 # on a phone-sized view is to show where the room runs out, not every wobble.
 BAND_MAX_POINTS = 200
 
+# Per-object geometry for the app's close-in view, forwarded in every
+# telemetry frame. obstacle_clusters.py's own summary cannot go on this link:
+# one object carries up to 64 numbers of lateral profile, and forty of them
+# would be the whole 2 Hz budget spent on a shape nobody can see from above.
+# So only what can be drawn is kept, NEAREST FIRST -- what a crowded scene
+# drops is the far half, never the object about to be driven into.
+OBJECT_MAX_COUNT = 10
+# Path samples per object, at phone size. More draws the same line.
+OBJECT_TRAIL_MAX_POINTS = 8
+# Below this a path is not a path, it is a parked object's centroid twitching
+# by centimetres. Drawn, it says "moving" about something that is not, so it
+# is dropped and the object shows as the dot it is.
+OBJECT_TRAIL_MIN_SPAN_M = 0.25
+# How much of an object's past is kept here. The producer's own tracker keeps
+# 3.0 s and this is the same window deliberately: two views of one scene that
+# disagree about how long ago something was elsewhere is worse than either.
+OBJECT_TRAIL_HISTORY_S = 3.0
+# A ceiling on remembered objects, so a scene the filter never trims -- a
+# crowded crossing, a scan full of kerb -- cannot grow this without bound.
+OBJECT_TRAIL_MAX_TRACKS = 64
+# Further than this between two sightings of one id and it is not one object
+# any more. Ids are the producer's track ids where it has tracks and plain
+# list indices where it does not, and an index is handed to whatever cluster
+# happens to sort into that slot next. Without this, two objects a pavement
+# apart get joined by a line neither of them walked.
+OBJECT_TRAIL_JUMP_M = 1.5
+
+# What the app is not shown, and why it is safe not to show it.
+#
+# A campus scan is mostly ground. Sampled live 2026-08-27, a quarter of every
+# message was clusters like 0.21 x 0.26 x 0.10 m from five returns -- a speck
+# of kerb, a drain, a paving lip. Drawn, they are a screen full of boxes with
+# nothing in it, and the one object that matters is somewhere in the middle
+# of them.
+#
+# THIS IS A DISPLAY FILTER AND NOTHING ELSE. It runs on the copy going out
+# over Bluetooth, never on /perception/objects_summary, which safety_gate and
+# the followers read -- filtering there would hide obstacles from the guard,
+# which is the one thing this must never do.
+#
+# Anything in the corridor is exempt whatever its evidence. What stops the
+# chair is never hidden from the person watching it.
+OBJECT_MIN_HEIGHT_M = 0.25
+OBJECT_MIN_POINTS = 10
+
+# Where "long" stops meaning "vehicle", for the label the app prints.
+#
+# classify() has a floor and no ceiling, so length alone carries it: a kerb
+# line, a hedge or a campus wall is over 1.5 m across and sits inside the
+# 0.9-2.5 m height window, and comes out as a parked car. What separates a
+# car from a wall is not size but shape -- a car seen from anywhere is
+# roughly 4.5 x 1.8 m, a wall is however long the scan reached by however
+# thin it is -- so both are checked here. 6.5 m clears a real car's 4.9 m
+# diagonal and stops well short of a building face; 4.0 clears a car seen
+# end-on and rejects the 12:1 slabs the pavement is full of. Measured
+# against 25 s of live campus clusters 2026-08-27: 300 of 1254 "vehicles".
+#
+# Display only, and it has to stay that way. The producer's label is what
+# cluster_guard reads (PERSON_LABEL), and nothing here can turn anything
+# into or out of a person -- only "vehicle" is ever rewritten, and only into
+# "obstacle", a name no controller reads at all.
+VEHICLE_MAX_FOOTPRINT_M = 6.5
+VEHICLE_MAX_ELONGATION = 4.0
+
+
+def display_class(obj):
+    """The producer's label, with the walls taken back out of "vehicle"."""
+    label = obj.get("class")
+    if label != "vehicle":
+        return label
+    size = obj.get("size") or []
+    if len(size) < 2:
+        return label                    # no shape stated: no grounds to argue
+    try:
+        span_x, span_y = abs(float(size[0])), abs(float(size[1]))
+    except (TypeError, ValueError):
+        return label
+    long_side = max(span_x, span_y)
+    short_side = max(min(span_x, span_y), 1e-3)
+    if math.hypot(span_x, span_y) > VEHICLE_MAX_FOOTPRINT_M or \
+            long_side / short_side > VEHICLE_MAX_ELONGATION:
+        return "obstacle"
+    return label
+
+
+def thin_trail(trail):
+    """An object's path, reduced to what is worth the bytes.
+
+    Returns ``[]`` for a path that goes nowhere. A parked object still has a
+    history -- its centroid slides by a few centimetres as more of it comes
+    into view -- and drawing that puts a scribble under every bollard on the
+    pavement, which reads as a crowd. The span is measured as the bounding
+    box diagonal rather than end to end, so someone who walks out and back
+    still counts as having moved.
+    """
+    points = []
+    for point in trail:
+        try:
+            points.append([round(float(point[0]), 2),
+                           round(float(point[1]), 2)])
+        except (IndexError, KeyError, TypeError, ValueError):
+            return []
+    if len(points) < 2:
+        return []
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    if math.hypot(max(xs) - min(xs),
+                  max(ys) - min(ys)) < OBJECT_TRAIL_MIN_SPAN_M:
+        return []
+    stride = max(1, (len(points) + OBJECT_TRAIL_MAX_POINTS - 1)
+                 // OBJECT_TRAIL_MAX_POINTS)
+    thinned = points[::stride]
+    # The newest sample is the one that sits on the object itself. Thinning
+    # must never be what pulls a path off the box it belongs to -- that is
+    # the only thing saying which path is whose.
+    if thinned[-1] != points[-1]:
+        thinned.append(points[-1])
+    return thinned
+
+
+class TrailMemory:
+    """Where each object has been, remembered on this side of the link.
+
+    The app draws paths so the operator can see that the thing in the
+    corridor walked into it rather than having been parked there all along.
+    Nothing on the wire carries that: /perception/objects_summary states
+    where each object is now, and the history behind it lives inside
+    obstacle_clusters.py -- a file the chair drives on, which is not being
+    edited for a dashboard. So the bridge keeps its own.
+
+    The samples are stored in the MAP frame and handed back out about the
+    chair's CURRENT pose. That is the whole design and not an implementation
+    detail: objects arrive chair-relative, so a parked bollard's x/y changes
+    every frame the chair moves, and a path stored as it arrived would draw
+    the chair's own journey under every stationary object on the pavement --
+    a viewer reads that as a crowd walking backwards. Going through the pose
+    both ways cancels the chair's motion, so anything genuinely parked
+    collapses to a point and only real motion draws a line.
+
+    With no pose there is no frame to do that in, and the honest output is
+    no path at all. A dot is worth less than a line and much less than a lie.
+    """
+
+    def __init__(self, history_s=OBJECT_TRAIL_HISTORY_S,
+                 max_tracks=OBJECT_TRAIL_MAX_TRACKS):
+        self.history_s = history_s
+        self.max_tracks = max_tracks
+        self._tracks = {}
+
+    @staticmethod
+    def _to_map(pose, x, y):
+        px, py, yaw_deg = pose
+        yaw = math.radians(yaw_deg)
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+        return (px + x * cos_yaw - y * sin_yaw,
+                py + x * sin_yaw + y * cos_yaw)
+
+    @staticmethod
+    def _to_chair(pose, map_x, map_y):
+        px, py, yaw_deg = pose
+        yaw = math.radians(yaw_deg)
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+        dx, dy = map_x - px, map_y - py
+        return (dx * cos_yaw + dy * sin_yaw, -dx * sin_yaw + dy * cos_yaw)
+
+    def observe(self, key, x, y, pose, now):
+        """Record one sighting of ``key``, or do nothing without a pose."""
+        if pose is None or key is None:
+            return
+        map_x, map_y = self._to_map(pose, x, y)
+        history = self._tracks.get(key)
+        if history and math.hypot(map_x - history[-1][1],
+                                  map_y - history[-1][2]) > OBJECT_TRAIL_JUMP_M:
+            history = None              # this id now belongs to something else
+        if history is None:
+            history = self._tracks[key] = []
+        history.append((now, map_x, map_y))
+        cutoff = now - self.history_s
+        while history and history[0][0] < cutoff:
+            history.pop(0)
+
+    def trail(self, key, pose):
+        """``[[x, y], ...]`` about the chair as it is now, oldest first."""
+        history = self._tracks.get(key)
+        if pose is None or not history or len(history) < 2:
+            return []
+        return [list(self._to_chair(pose, map_x, map_y))
+                for _stamp, map_x, map_y in history]
+
+    def sweep(self, now):
+        """Forget what has gone, and cap what has not.
+
+        Objects leave by walking out of range, and ids are reused, so
+        without this the memory grows for as long as the bridge runs.
+        """
+        for key in [k for k, h in list(self._tracks.items())
+                    if not h or (now - h[-1][0]) > self.history_s]:
+            del self._tracks[key]
+        excess = len(self._tracks) - self.max_tracks
+        if excess > 0:
+            for key in sorted(self._tracks,
+                              key=lambda k: self._tracks[k][-1][0])[:excess]:
+                del self._tracks[key]
+
+
+def worth_drawing(obj):
+    """Is this a thing, or is it the ground?
+
+    Height first, because that is what actually separates them: a 0.10 m rise
+    outside the corridor is paving, and no number of returns makes it an
+    object. The point count catches the other tail, the handful of stray
+    returns that a box gets drawn around at fifteen metres.
+
+    Missing evidence keeps the object. A producer that does not publish a
+    height has not told us it is flat.
+    """
+    if obj.get("band_relation") in ("inside", "overlap"):
+        return True                     # in the way: never hidden
+    size = obj.get("size") or []
+    if len(size) >= 3:
+        try:
+            if float(size[2]) < OBJECT_MIN_HEIGHT_M:
+                return False
+        except (TypeError, ValueError):
+            pass
+    points = obj.get("points")
+    if isinstance(points, int) and points < OBJECT_MIN_POINTS:
+        return False
+    return True
+
+
+def drawable_object(obj, x, y, trail=None):
+    """One cluster reduced to what a top-down view can draw.
+
+    Names are the producer's own, so there is one vocabulary between
+    /perception/objects_summary, this link and the app rather than three --
+    the single exception being the vehicle label, which is corrected for
+    display and keeps the producer's word beside it in ``raw_class``.
+    """
+    size = obj.get("size") or []
+    record = {
+        "id": obj.get("id"),
+        "class": display_class(obj),
+        "raw_class": obj.get("class"),
+        "band_relation": obj.get("band_relation"),
+        "x": round(x, 2),
+        "y": round(y, 2),
+        # Footprint only. Height is not drawable from above, and the view
+        # asks nothing that depends on it.
+        "size": ([round(float(size[0]), 2), round(float(size[1]), 2)]
+                 if len(size) >= 2 else None),
+        "motion": obj.get("motion"),
+        "speed_mps": obj.get("speed_mps"),
+    }
+    # The producer's own path when it publishes one -- it has the tracker's
+    # full history and a better frame to state it in -- and the bridge's
+    # reconstruction only where it does not.
+    thinned = thin_trail(obj.get("trail") or trail or [])
+    if thinned:
+        record["trail"] = thinned
+    return record
+
 
 _BRINGUP_ROUTE_RE = re.compile(r'^\s*ROUTE=\"\$\{ROUTE:-(?P<path>[^}]+)\}\"')
 
@@ -585,6 +847,17 @@ class BridgeState:
         self.objects_nearest_m = None
         self.objects_nearest_in_band_m = None
         self.bloom_filtered = None
+        # The nearest few clusters with enough geometry to draw them. A count
+        # and a distance tell an operator that something is there; only this
+        # tells them what the chair is looking at, and whether the thing in
+        # the corridor walked in or was always parked in it.
+        self.objects_list = None
+        # Which axes objects_list is on, in the producer's own words. Never
+        # guessed: two nodes publish this topic and they do not agree.
+        self.objects_frame = None
+        # How many clusters the display filter and the count cap left out, so
+        # the app can say the view is trimmed rather than imply a quiet field.
+        self.objects_hidden = None
         # Roll and pitch out of the localizer's own pose. FAST-LIO builds the
         # map gravity-aligned, so tilt in the map frame is the chair's tilt --
         # and nothing else on this stack publishes an angle at all. tip_guard,
@@ -704,6 +977,19 @@ class BridgeState:
                     self.objects_nearest_in_band_m, self.objects_stamp, now),
                 "bloom_filtered": self._fresh(self.bloom_filtered,
                                               self.objects_stamp, now),
+                # The nearest clusters themselves, for the close-in view.
+                # Chair-aligned and x-forward, y-left, but WHICH origin is
+                # the producer's to say -- obstacle_clusters.py answers
+                # "lidar", hybrid_object_fusion.py answers "chair_centre",
+                # and they sit about half a metre apart. Either way it is not
+                # the map frame pose_x/pose_y use. Null means the producer
+                # did not say, which the app must not read as "lidar".
+                "objects": self._fresh(self.objects_list,
+                                       self.objects_stamp, now),
+                "objects_frame": self._fresh(self.objects_frame,
+                                             self.objects_stamp, now),
+                "objects_hidden": self._fresh(self.objects_hidden,
+                                              self.objects_stamp, now),
                 "robot_fault": self.robot_fault,
 
                 # Navigation view. Pose is the same /fast_lio_icp/pose the route
@@ -753,8 +1039,12 @@ class RosLink:
         self.node_name = node_name
         self.connected = False
         self.mode_pub = None
-        self._blackbox = None
+        self._master_node_cache = None
         self._blackbox_stamp = 0.0
+        # Where the objects have been. Kept here rather than in BridgeState
+        # because it is working memory of one subscription, not a reading the
+        # app is ever shown: what crosses the link is the path it produces.
+        self.trails = TrailMemory()
 
     # rosbag record names itself /record_<stamp> and subscribes to every topic
     # it writes, so the master's own tables are the cheapest place to see it --
@@ -763,18 +1053,32 @@ class RosLink:
     # the answer changes about once a session.
     BLACKBOX_POLL_S = 5.0
 
-    def blackbox_recording(self):
-        """True, False, or None when the question cannot be answered.
+    # The field stack's own nodes, for answering "is it already up".
+    #
+    # The job runner cannot answer that: it knows only what the APP started,
+    # so a stack brought up at the keyboard -- which is most of them -- left
+    # the dashboard saying 대기 중 and offering [로컬 켜기] next to a chair
+    # that was already running, on a master where every one of these was
+    # registered. Verified on the NUC 2026-08-27.
+    #
+    # One from each layer that has to be alive for the chair to drive, so a
+    # half-started stack cannot read as a whole one: the localizer, the gate,
+    # the tip guard, the wheel encoder and the UART.
+    STACK_NODES = ("/moving_icp_localizer", "/safety_gate", "/tip_guard",
+                   "/wheel_cmd", "/uart")
 
-        None rather than False on any failure. "No recording" and "could not
-        ask" look identical on a dashboard and mean opposite things: the first
-        is worth acting on before a run, the second is worth ignoring.
+    def _master_nodes(self):
+        """Every node the master knows, cached, or None when it will not say.
+
+        One query answers both the recording check and the stack check; they
+        used to be one call each at the same 5 s period, on a link where the
+        round trip is the expensive part.
         """
         if not (ROS_AVAILABLE and self.connected):
             return None
         now = time.time()
         if now - self._blackbox_stamp < self.BLACKBOX_POLL_S:
-            return self._blackbox
+            return self._master_node_cache
         self._blackbox_stamp = now
         try:
             # MasterProxy injects the caller id itself; passing one is a
@@ -782,16 +1086,41 @@ class RosLink:
             # except-less path below reads as "cannot tell" forever.
             code, _, state = rospy.get_master().getSystemState()
             if code != 1:
-                return self._blackbox
+                return self._master_node_cache
             nodes = set()
             for section in state:          # publishers, subscribers, services
                 for _name, owners in section:
                     nodes.update(owners)
-            self._blackbox = any(n.startswith("/record_") for n in nodes)
+            self._master_node_cache = nodes
         except Exception:
-            # A master that will not answer is not evidence of no recording.
-            return self._blackbox
-        return self._blackbox
+            # A master that will not answer is not evidence of anything.
+            return self._master_node_cache
+        return self._master_node_cache
+
+    def blackbox_recording(self):
+        """True, False, or None when the question cannot be answered.
+
+        None rather than False on any failure. "No recording" and "could not
+        ask" look identical on a dashboard and mean opposite things: the first
+        is worth acting on before a run, the second is worth ignoring.
+        """
+        nodes = self._master_nodes()
+        if nodes is None:
+            return None
+        return any(n.startswith("/record_") for n in nodes)
+
+    def stack_nodes_up(self):
+        """How many of STACK_NODES the master has, or None if it will not say.
+
+        Deliberately a count rather than a verdict. "The stack is up" is one
+        word for a thing that comes up in layers and dies in pieces, and 3 of
+        5 is the state an operator most needs to see -- it is the one that
+        looks like a working chair right up until it is asked to move.
+        """
+        nodes = self._master_nodes()
+        if nodes is None:
+            return None
+        return sum(1 for name in self.STACK_NODES if name in nodes)
 
     # ------------------------------------------------------------------ setup
     @staticmethod
@@ -960,6 +1289,31 @@ class RosLink:
             self.state.tip_guard_status = msg.data
             self.state.tip_guard_stamp = time.time()
 
+    # How stale the pose may be before it can no longer place an object.
+    # /fast_lio_icp/pose arrives at 10 Hz and the objects at 5; half a second
+    # of it missing is a localizer in trouble, and a path drawn about a pose
+    # from a second ago is a path drawn in the wrong place.
+    TRAIL_POSE_TTL_S = 0.5
+
+    def _trail_pose(self, now):
+        """The chair's pose as ``(x, y, yaw_deg)``, or None if it is not fit
+        to place anything about.
+
+        Trails are stored in the map frame and drawn about where the chair is
+        now, so this is the transform at both ends. Returning None where the
+        pose is stale is what makes the app show plain dots during a
+        localization drop-out rather than paths bent by the error.
+        """
+        with self.state.lock:
+            x, y = self.state.pose_x, self.state.pose_y
+            yaw = self.state.pose_yaw_deg
+            stamp = self.state.pose_stamp
+        if None in (x, y, yaw) or stamp is None:
+            return None
+        if (now - stamp) > self.TRAIL_POSE_TTL_S:
+            return None
+        return (float(x), float(y), float(yaw))
+
     def _objects_cb(self, msg):
         """obstacle_clusters.py publishes a JSON blob; keep what steers a decision.
 
@@ -971,26 +1325,73 @@ class RosLink:
         text = msg.data
         status = band = counts = None
         in_band = nearest = nearest_in_band = bloom = None
+        drawable = frame = hidden = None
+        now = time.time()
+        pose = self._trail_pose(now)
         try:
             blob = json.loads(text)
             status = blob.get("status")
+            # The producer's own word for which axes these are on, carried
+            # through rather than asserted here. This bridge assumed "lidar",
+            # which was true of obstacle_clusters.py and false the moment a
+            # second producer appeared: hybrid_object_fusion.py publishes the
+            # same shape in "chair_centre", half a metre away. A view that
+            # believes a hardcoded frame draws the pavement in the wrong
+            # place and has no way to find out.
+            frame = blob.get("frame")
             band = blob.get("band_status")
             bloom = blob.get("bloom_filtered")
             counts = {k: v for k, v in (blob.get("counts") or {}).items()
                       if isinstance(v, int) and v}
             objects = blob.get("objects") or []
             in_band = 0
+            by_distance = []
             for obj in objects:
                 try:
-                    distance = math.hypot(float(obj["x"]), float(obj["y"]))
+                    x, y = float(obj["x"]), float(obj["y"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                distance = math.hypot(x, y)
+                by_distance.append((distance, x, y, obj))
                 if nearest is None or distance < nearest:
                     nearest = distance
                 if obj.get("band_relation") in ("inside", "overlap"):
                     in_band += 1
                     if nearest_in_band is None or distance < nearest_in_band:
                         nearest_in_band = distance
+                # Every object is remembered, not only the ten that get drawn:
+                # a path has to already exist by the time something walks in
+                # from the far half of the scene, which is exactly when it
+                # matters most.
+                if obj.get("motion") != "static":
+                    self.trails.observe(obj.get("id"), x, y, pose, now)
+            self.trails.sweep(now)
+            # Ground first, then nearest, then cut. Filtering before the cut
+            # is the point: ten specks of paving would otherwise fill the ten
+            # slots and push a person off the end of the list.
+            worth = [item for item in by_distance if worth_drawing(item[3])]
+            hidden = len(by_distance) - len(worth)
+            worth.sort(key=lambda item: item[0])
+            drawable = [drawable_object(obj, x, y,
+                                        self.trails.trail(obj.get("id"), pose))
+                        for _distance, x, y, obj in worth[:OBJECT_MAX_COUNT]]
+            # Everything the app is not being shown, counted. A filtered view
+            # that does not say it is filtered is a view that lies quietly.
+            hidden += max(0, len(worth) - OBJECT_MAX_COUNT)
+            # Counted again under the labels the app will print. The producer
+            # counts its own classification, so leaving its tally alone would
+            # put "차량 3" above a view drawing three walls as obstacles, and
+            # a dashboard that contradicts itself gets believed at the wrong
+            # moment. Only the display label moves; nothing is added or lost,
+            # and the tally covers every object rather than only the ones
+            # that could be placed -- a cluster the view cannot draw is still
+            # a cluster the perception node is tracking.
+            relabelled = {}
+            for obj in objects:
+                label = display_class(obj)
+                relabelled[label] = relabelled.get(label, 0) + 1
+            if objects:
+                counts = {k: v for k, v in relabelled.items() if v}
             parts = [str(status or "?")]
             if band and band != status:
                 parts.append("band %s" % band)
@@ -1012,6 +1413,9 @@ class RosLink:
             self.state.objects_nearest_in_band_m = (
                 None if nearest_in_band is None else round(nearest_in_band, 1))
             self.state.bloom_filtered = bloom
+            self.state.objects_list = drawable
+            self.state.objects_frame = frame
+            self.state.objects_hidden = hidden
             self.state.objects_stamp = time.time()
 
     def _diag_cb(self, msg):
@@ -1061,7 +1465,7 @@ class RosLink:
         self.mode_pub.publish(Int16(data=value))
         return True, "mode_cmd=%d published" % value
 
-    def engage_estop(self):
+    def engage_estop(self, mark_estop=True):
         """mode_cmd=77 first, then pause the follower -- exactly what stop.sh does.
 
         Pausing matters more than it looks. waypoint_follower.py holds on
@@ -1073,49 +1477,73 @@ class RosLink:
         Order is deliberate: publishing the topic is instant and cannot fail, so
         it happens before the service call, and a missing service never blocks
         the stop.
+
+        ``mark_estop`` decides whether the app is told an EMERGENCY happened,
+        and it is the only difference between this and an ordinary [주행 정지].
+        Both do the same two acts, because stop.sh does the same two acts; only
+        the label differs, and the label matters: ``estop_engaged`` greys out
+        the drive controls and points the rider at [E-STOP 해제]. Calling an
+        ordinary stop an e-stop sent someone looking for an emergency that
+        never happened.
         """
         ok, detail = self._publish_mode(MANUAL_MODE)
         if not ok:
             return ok, detail
-        with self.state.lock:
-            self.state.estop_requested_at = time.time()
+        if mark_estop:
+            with self.state.lock:
+                self.state.estop_requested_at = time.time()
         paused, pause_detail = self.set_follower(False)
-        return True, ("E-STOP 발동 (mode_cmd=77). uart.py가 모터 정지 프레임을 보내고 "
+        return True, ("%s (mode_cmd=77). uart.py가 모터 정지 프레임을 보내고 "
                       "자율 명령을 무시합니다. 팔로워 %s"
-                      % ("정지됨" if paused else "정지 실패(%s) — 해제 전에 확인 필요"
+                      % ("E-STOP 발동" if mark_estop else "주행 정지",
+                         "정지됨" if paused else "정지 실패(%s) — 해제 전에 확인 필요"
                          % pause_detail[:60]))
 
-    def release_estop(self, resume=False):
-        """mode_cmd=65, and optionally resume the follower in the same breath.
+    def release_estop(self):
+        """mode_cmd=65. Arms the base; does not start the drive.
 
-        Arming used to be documented as "driving stays stopped until you start
-        it", and that was never reliably true. waypoint_follower.py holds on
-        MANUAL_MODE but stays ``enabled``, so whether mode 65 resumed the drive
-        depended on how the follower had been paused: stop.sh disables it, a
-        joystick failsafe does not. Same button, two different outcomes.
-
-        The operator asked for the resuming one, so it is now what the command
-        does -- explicitly, by calling the start service, rather than by relying
-        on a leftover ``enabled``. One button, one outcome, and the app says the
-        chair will move.
+        It used to take a ``resume`` flag and call the follower's start service
+        itself, because the operator asked for one button that arms and drives.
+        They still get one button -- Session._arm_and_drive is that button --
+        but the driving half of it now goes down the same path as [주행 시작],
+        through go.sh and every preflight behind it. Starting the follower from
+        here meant the app's ordinary way of setting off was also the only way
+        that skipped all of them.
         """
         ok, detail = self._publish_mode(AUTO_MODE)
         if not ok:
             return ok, detail
         with self.state.lock:
             self.state.estop_requested_at = None
-        if not resume:
-            return True, ("released (mode_cmd=65). A stop frame is sent first, so "
-                          "the chair does not lurch. Driving stays stopped.")
-        # uart.py sends a motor stop frame when it re-enters auto, so the resume
-        # has to land after that; a service call is not instant either, which is
-        # the gap that makes this ordering safe rather than a lurch.
-        started, follower_detail = self.set_follower(True)
-        if not started:
-            return True, ("자동 모드 전환 완료 (mode_cmd=65). 다만 주행 재개는 "
-                          "실패했습니다 — %s. [주행 시작]을 눌러주세요." % follower_detail)
-        return True, ("자동 모드 전환 + 주행 재개 (mode_cmd=65, 팔로워 시작). "
-                      "휠체어가 멈춘 지점의 웨이포인트부터 이어서 주행합니다.")
+        return True, ("released (mode_cmd=65). A stop frame is sent first, so "
+                      "the chair does not lurch. Driving stays stopped.")
+
+    def await_auto_echo(self, timeout_s=2.0):
+        """Block until the motor controller echoes auto on /wheel_status.
+
+        Design rule 5: a command is effective when the echo agrees, not when we
+        publish it. uart.py transmits a stop frame on entering auto and only
+        then begins accepting wheel_cmd, so a drive started inside that window
+        runs with every command discarded -- the follower reports DRIVING, the
+        dashboard is green, and the chair does not move. That is the most
+        expensive state to diagnose in the field, so it is worth two seconds.
+        """
+        deadline = time.time() + timeout_s
+        while True:
+            now = time.time()
+            with self.state.lock:
+                mode = self.state.drive_mode
+                stamp = self.state.wheel_status_stamp
+            if stamp is not None and (now - stamp) <= 2.0 and mode == AUTO_MODE:
+                return True, "auto echoed by the motor controller"
+            if now >= deadline:
+                if stamp is None:
+                    return False, "/wheel_status has never arrived"
+                if (now - stamp) > 2.0:
+                    return False, "/wheel_status went silent %.1fs ago" % (now - stamp)
+                return False, ("controller still echoing %s"
+                               % MODE_LABELS.get(mode, "mode=%s" % mode))
+            time.sleep(0.1)
 
     def set_follower(self, running, ensure_auto=False):
         if not self.allow_commands:
@@ -1204,6 +1632,14 @@ class Session:
             # Whether this run is being recorded. Finding out afterwards that
             # it was not is the one thing that cannot be fixed afterwards.
             frame["blackbox_recording"] = self.ros.blackbox_recording()
+            # Whether the robot software is already running, asked of the ROS
+            # master rather than of the job runner -- which only ever knew
+            # what this app itself launched.
+            up = self.ros.stack_nodes_up()
+            frame["stack_nodes_up"] = up
+            frame["stack_nodes_total"] = len(self.ros.STACK_NODES)
+            frame["stack_running"] = None if up is None else \
+                up >= len(self.ros.STACK_NODES)
             if self.jobs is not None:
                 frame.update(self.jobs.snapshot())
                 frame["jobs_available"] = self.jobs.available()
@@ -1268,7 +1704,7 @@ class Session:
             elif command in ("estop_release", "release", "rearm", "arm"):
                 ok, detail = self._release(payload)
             elif command == "arm_and_drive":
-                ok, detail = self._release(payload, resume=True)
+                ok, detail = self._arm_and_drive(payload)
             elif command == "drive_start":
                 ok, detail = self._drive(payload, True)
             elif command == "drive_stop":
@@ -1324,7 +1760,7 @@ class Session:
         return True, "경로 %d개 지점 전송 (%s)" % (route.get("count_full", 0),
                                               route.get("source", "?"))
 
-    def _release(self, payload, resume=False):
+    def _release(self, payload):
         """Two-step: the app must send confirm=true, and the chair must be stopped."""
         if not payload.get("confirm"):
             return False, ("confirmation required: resend with \"confirm\": true "
@@ -1343,18 +1779,58 @@ class Session:
         if moving > 0.05:
             return False, ("refusing: chair is still moving (%.2f m/s, %s odometry)"
                            % (moving, source))
-        return self.ros.release_estop(resume=resume)
+        return self.ros.release_estop()
+
+    def _arm_and_drive(self, payload):
+        """[시동 + 주행] / [E-STOP 해제]: arm the base, then drive the same way
+        [주행 시작] does.
+
+        This used to publish mode 65 and call the follower's start service
+        directly. Same button, and on a stack brought up through tools/hybrid.sh
+        a completely different amount of checking underneath it: go_hybrid.sh
+        pings eight nodes, verifies the CuPy/RTX DWA backend, verifies
+        PointPillars when the perception profile asks for it, runs
+        hybrid_preflight.py and person_bypass_preflight.py, and only then hands
+        off to go.sh. None of that ran here.
+
+        And this is not the rare path. The app sends arm_and_drive from
+        [주행 시작] too whenever the base is resting in manual, which is the
+        normal state immediately after bring-up -- so the ordinary way to set
+        off was the one way that skipped every preflight.
+        """
+        ok, detail = self._release(payload)
+        if not ok:
+            return ok, detail
+        armed, echo = self.ros.await_auto_echo()
+        if not armed:
+            return False, ("자동 모드(mode_cmd=65)는 보냈지만 모터 컨트롤러가 "
+                           "확인해주지 않았습니다 — %s. 주행은 시작하지 "
+                           "않았습니다." % echo)
+        ok, drive_detail = self._drive(payload, True)
+        if not ok:
+            return False, ("자동 모드 전환 완료 (mode_cmd=65). 주행은 거부됨 — %s"
+                           % drive_detail)
+        return True, "시동 완료 (mode_cmd=65). %s" % drive_detail
 
     def _halt(self):
         """Stop must never refuse, so fall back to the direct path when the script
-        is unavailable -- mirroring stop.sh, which checks nothing on purpose."""
+        is unavailable -- mirroring stop.sh, which checks nothing on purpose.
+
+        The fallback used to pause the follower and stop there, while stop.sh
+        also publishes mode 77. Same button, two different amounts of stopping,
+        chosen by a flag the rider cannot see: with scripts off the base stayed
+        in auto, so anything that published a wheel_cmd afterwards still moved
+        the chair. The fallback now does both acts, in stop.sh's order -- mode
+        first, because publishing a topic is instant and cannot fail, and a
+        missing service must never be what delays a stop.
+        """
         if self.jobs is not None and self.jobs.enabled:
             ok, detail = self.jobs.start("halt")
             if ok:
                 return ok, detail
-            fallback_ok, fallback_detail = self.ros.set_follower(False)
+            fallback_ok, fallback_detail = self.ros.engage_estop(mark_estop=False)
             return fallback_ok, "%s / 직접 정지: %s" % (detail, fallback_detail)
-        return self.ros.set_follower(False)
+        return self.ros.engage_estop(mark_estop=False)
 
     def _stack_start(self, payload):
         if self.jobs is None or not self.jobs.enabled:
@@ -1677,6 +2153,14 @@ def self_test(args, state, ros, jobs=None, route=None, route_finder=None):
     ack = next_of("ack")
     check("drive_start refused with commands disabled",
           ack is not None and ack["ok"] is False)
+
+    # The ordering that matters in arm_and_drive: everything that can refuse
+    # has to refuse BEFORE mode 65 goes out. Arming and then discovering the
+    # drive cannot start leaves the base armed on a chair nobody is driving.
+    send({"command": "arm_and_drive", "confirm": True})
+    ack = next_of("ack")
+    check("arm_and_drive refuses before arming, not after",
+          ack is not None and ack["ok"] is False and "wheel_status" in ack["detail"])
 
     send({"command": "ping"})
     ack = next_of("ack")

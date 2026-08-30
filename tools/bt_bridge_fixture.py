@@ -92,6 +92,10 @@ class Fixture(object):
 
         self.pub_wheel = self._publisher("/wheel_status", Int16MultiArray, 5)
         self.pub_odom = self._publisher("/Odometry", Odometry, 1)
+        # The bridge takes speed from /odom (wheel encoders) and only falls back
+        # to /Odometry, whose twist FAST-LIO leaves at zero. A fixture that
+        # publishes only /Odometry therefore shows 0 m/s no matter what it does.
+        self.pub_wheel_odom = self._publisher("/odom", Odometry, 1)
         self.pub_raw = self._publisher("/cmd_vel_raw", Twist, 1)
         self.pub_gated = self._publisher("/cmd_vel_gated", Twist, 1)
         self.pub_out = self._publisher("/cmd_vel", Twist, 1)
@@ -167,6 +171,115 @@ class Fixture(object):
         array.status = [status]
         self.pub_diag.publish(array)
 
+    def scene_objects(self, what):
+        """A pavement the close-in view can be checked against.
+
+        Two objects that must look different: a bollard parked beside the
+        path, whose centroid jitters but which must draw no path at all, and
+        someone crossing in front of the chair, who must. Getting those two
+        the same way round is the whole point of the view, and it cannot be
+        checked against a scene that only has one kind of thing in it.
+
+        Positions are the lidar frame -- x forward, y left -- which is what
+        obstacle_clusters.py publishes and what the bridge forwards.
+
+        NOTHING HERE PUBLISHES A ``trail``, deliberately. The producer on
+        this branch does not, so a fixture that did would exercise a path
+        through the bridge that the field never takes, and would hide the
+        one that it does: the bridge reconstructing the paths itself out of
+        successive frames and the pose. What the view draws in the lab has
+        to be made the same way it is made at the chair.
+        """
+        elapsed = time.time() - self.started_at
+
+        def crossing_at(seconds):
+            """Someone pacing across the front of the chair at ~1.1 m/s."""
+            return round(2.2 * math.sin(seconds * 0.5), 2)
+
+        objects = [{
+            "class": "person",
+            "raw_class": "person",
+            "band_relation": ("inside" if abs(crossing_at(elapsed)) < 0.6
+                              else "outside"),
+            "band_inside_fraction": (1.0 if abs(crossing_at(elapsed)) < 0.6
+                                     else 0.0),
+            "x": 6.0, "y": crossing_at(elapsed),
+            "size": [0.55, 0.62, 1.74],
+            "profile": [], "points": 260, "id": 11,
+            "motion": "moving",
+            "speed_mps": 1.1,
+            "age_s": min(elapsed, 9.9),
+        }, {
+            "class": "obstacle",
+            "raw_class": "obstacle",
+            "band_relation": "outside",
+            "band_inside_fraction": 0.0,
+            "x": 3.4, "y": -1.25,
+            "size": [0.3, 0.3, 0.95],
+            "profile": [], "points": 84, "id": 12,
+            "motion": "static",
+            "speed_mps": 0.0,
+            "age_s": min(elapsed, 60.0),
+        }, {
+            # A track too young to have a verdict yet. Its centroid jitters
+            # by centimetres, which is the case the bridge's span guard
+            # exists for: drawn, it would read as something about to step
+            # out into the path.
+            "class": "obstacle",
+            "raw_class": "obstacle",
+            "band_relation": "outside",
+            "band_inside_fraction": 0.0,
+            "x": round(4.9 + 0.01 * (int(elapsed * 5) % 3), 2),
+            "y": round(1.9 - 0.01 * (int(elapsed * 5) % 2), 2),
+            "size": [0.45, 0.4, 1.1],
+            "profile": [], "points": 96, "id": 14,
+            "motion": "unknown",
+            "speed_mps": 0.06,
+            "age_s": 0.6,
+        }, {
+            # A campus wall. classify() calls this a vehicle -- long enough,
+            # and inside the height window -- and the app draws a parked car
+            # across the pavement unless the bridge takes the label back.
+            "class": "vehicle",
+            "raw_class": "vehicle",
+            "band_relation": "outside",
+            "band_inside_fraction": 0.0,
+            "x": 7.5, "y": -3.2,
+            "size": [9.4, 0.35, 1.6],
+            "profile": [], "points": 1200, "id": 15,
+            "motion": "static",
+            "speed_mps": 0.0,
+            "age_s": 30.0,
+        }, {
+            # Paving. Present in every real message and in none of the old
+            # fixtures, so the display filter had nothing to remove.
+            "class": "obstacle",
+            "raw_class": "obstacle",
+            "band_relation": "outside",
+            "band_inside_fraction": 0.0,
+            "x": 5.2, "y": -2.4,
+            "size": [0.21, 0.26, 0.1],
+            "profile": [], "points": 6, "id": 16,
+            "motion": "static",
+            "speed_mps": 0.0,
+            "age_s": 12.0,
+        }]
+        if what == "hold":
+            # What the gate is holding for: close, dead ahead, and walked in.
+            objects.insert(0, {
+                "class": "person",
+                "raw_class": "person",
+                "band_relation": "inside",
+                "band_inside_fraction": 1.0,
+                "x": 2.1, "y": round(0.05 + 0.35 * math.sin(elapsed * 0.8), 2),
+                "size": [0.6, 0.58, 1.68],
+                "profile": [], "points": 410, "id": 13,
+                "motion": "moving",
+                "speed_mps": 0.4,
+                "age_s": 2.4,
+            })
+        return objects
+
     def twist(self, linear, angular=0.0):
         msg = Twist()
         msg.linear.x = linear
@@ -198,6 +311,16 @@ class Fixture(object):
             odom.twist.twist.linear.x = speed
             odom.twist.twist.angular.z = 0.01 if speed else 0.0
             self.pub_odom.publish(odom)
+            # odom_pub.py integrates in the world frame, so both x and y carry
+            # the speed; mirror that rather than putting it all on x.
+            _fx, _fy, fixture_yaw = self.pose_at(self.wp)
+            wheel_odom = Odometry()
+            wheel_odom.header.stamp = odom.header.stamp
+            wheel_odom.header.frame_id = "odom"
+            wheel_odom.twist.twist.linear.x = speed * math.cos(fixture_yaw)
+            wheel_odom.twist.twist.linear.y = speed * math.sin(fixture_yaw)
+            wheel_odom.twist.twist.angular.z = odom.twist.twist.angular.z
+            self.pub_wheel_odom.publish(wheel_odom)
 
             # The gate publishes a zero Twist while holding; it does not go
             # silent. Inferring the hold depends on both being present.
@@ -224,10 +347,17 @@ class Fixture(object):
             self.pub_follower.publish(String(data=follower))
 
             if what != "no_objects":
+                objects = self.scene_objects(what)
                 self.pub_objects.publish(String(data=json.dumps({
                     "status": "OK",
                     "band_status": "CLEAR" if what != "hold" else "BLOCKED",
-                    "counts": {"static": 2, "dynamic": 1 if what == "hold" else 0},
+                    # Stated, because the bridge forwards the producer's word
+                    # for it rather than assuming one.
+                    "frame": "lidar",
+                    "counts": {
+                        label: sum(1 for o in objects if o["class"] == label)
+                        for label in ("person", "vehicle", "obstacle")},
+                    "objects": objects,
                     "bloom_filtered": 0,
                 })))
 
