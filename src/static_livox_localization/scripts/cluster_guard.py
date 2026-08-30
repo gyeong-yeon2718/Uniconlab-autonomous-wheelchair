@@ -92,9 +92,15 @@ PERSON_LABEL = "person"
 # operator's side and went for their feet. Model at least a 0.70 m standing
 # footprint, while believing any larger observation.
 PERSON_MIN_HALF_EXTENT_M = 0.35
-# The chair is under 0.60 m wide. Keep its centre 0.35 m from obstacle
-# returns: 0.30 m physical half-width plus 0.05 m lateral reserve.
-PERSON_BYPASS_CLEARANCE_M = 0.35
+# The chair is under 0.60 m wide. 0.35 m from its centre - 0.30 m of physical
+# half width plus 0.05 m - is the least that is not a scrape, and it is what
+# 11acd88 drove with.
+#
+# 0.60 m is what the operator asked for on 2026-08-30 after watching it pass:
+# a wider berth is worth more than a tighter line, and the two encounters
+# that day were both refused for being too close rather than for having
+# nowhere to go. The reserve is the part that moves; the 0.30 m is the chair.
+PERSON_BYPASS_CLEARANCE_M = 0.60
 PERSON_BYPASS_SPEED_MPS = 0.35
 
 

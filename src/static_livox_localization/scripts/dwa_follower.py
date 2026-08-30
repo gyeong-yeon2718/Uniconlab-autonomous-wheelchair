@@ -301,6 +301,37 @@ class DwaFollower(WaypointFollower):
         self.odom_v = float(message.twist.twist.linear.x)
         self.odom_w = float(message.twist.twist.angular.z)
 
+    def gate_corridor_cap(self, base_cap):
+        """Slow to a speed the raw gate's straight corridor will pass.
+
+        The planner clears the gate's swept rectangle already. It did not
+        model the gate's OTHER veto - a straight forward corridor out to the
+        stopping envelope, which grows with the speed being asked for - and
+        on the 2026-08-30 16:14 drive that veto fired on 5.0 % of samples
+        against the sweep's 1.0 %, including 21.5 s in which the follower
+        asked for 0.80 m/s at a passable obstacle and never turned a wheel.
+
+        Asking slower shortens the envelope, so this is a cap and not a
+        refusal. Returning zero means no sampled speed clears it, and the
+        planner's own SPEED_BELOW_FLOOR then names the stop.
+
+        The returns here come from the cluster producer, while the gate reads
+        the raw cloud, so this is an under-estimate: it cannot see what was
+        never clustered. It removes the case where both DO see the object and
+        only the planner ignored what that implied about speed.
+        """
+        if not self.clusters_enabled or self.cluster_summary is None:
+            return base_cap
+        blocks, points = corridor_obstacle_points(
+            self.cluster_summary, OBSTACLE_HALF_WIDTH_M,
+            max_distance_m=PLAN_AHEAD_M)
+        if not blocks or not points:
+            return base_cap
+        cap = dwa_core.gate_corridor_speed_cap(
+            [(forward, lateral) for forward, lateral in points],
+            cloud_age_s=0.0)
+        return min(base_cap, cap) if cap > 0.0 else base_cap
+
     def obstacle_points(self, state):
         """The objects ahead, as the returns the rollouts must clear.
 
@@ -430,6 +461,10 @@ class DwaFollower(WaypointFollower):
         if threat is not None:
             cap = approach_cap(cap, threat.distance_m, stop_m,
                                dwa_core.TURN_FLOOR_SPEED)
+        # Before anything else the speed has to be one the raw gate's
+        # straight corridor will accept, or the arc is vetoed whatever its
+        # shape.
+        cap = self.gate_corridor_cap(cap)
         if decision in (GO_ROUND, APPROACH):
             # An approach is served at the speed the pass will be taken at.
             # Arriving faster than that only buys a shorter look and a

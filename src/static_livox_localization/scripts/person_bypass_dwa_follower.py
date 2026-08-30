@@ -66,7 +66,7 @@ class PersonBypassDwaFollower(DwaFollower):
         self.person_bypass_speed_mps = float(rospy.get_param(
             "~person_bypass_speed_mps", 0.35))
         self.person_bypass_clearance_m = float(rospy.get_param(
-            "~person_bypass_clearance_m", 0.35))
+            "~person_bypass_clearance_m", 0.60))
         self.qualifier = StaticPersonQualifier(
             confirmation_s=self.person_bypass_confirmation_s,
             maximum_gap_s=self.person_bypass_maximum_gap_s,

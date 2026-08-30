@@ -94,7 +94,13 @@ FORWARD_CHECK_EXTRA_M = 0.6
 # FOOTPRINT_*/SWEEP_MARGIN_M now come from motion_safety, so the planner can
 # clear the same rectangle this gate vetoes instead of a disc it chose itself.
 # Imported above; still readable as safety_gate.FOOTPRINT_* by every caller.
-RIDER_EXCLUDE_X_MIN_M = -1.0
+# The chair's own rear structure returns at x = -1.005, five millimetres
+# outside a box that ended at -1.0, so it was counted as an obstacle on every
+# scan of the 2026-08-30 drive - nearest_xy read [-1.005, -0.024] dead on the
+# centreline while footprint_points was 0. It inflates obstacle_points
+# permanently and can only ever be the chair: nothing else holds station 1 m
+# behind it to the millimetre.
+RIDER_EXCLUDE_X_MIN_M = -1.15
 RIDER_EXCLUDE_X_MAX_M = 0.55
 RIDER_EXCLUDE_HALF_WIDTH_M = 0.40
 # Forward FOV cone: the gate only checks obstacles the chair is

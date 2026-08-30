@@ -184,3 +184,76 @@ def test_a_dense_scan_is_decided_by_bounds_not_by_the_quadratic_test():
     poses = arc_poses(0.35, 0.25, 2.2, steps=65)
     centre = np.full((1, poses.shape[1]), 0.30)
     assert ms.footprint_clearance(poses, points, centre, 0.05)[0] == 0.0
+
+
+# ------------------------------- the gate's OTHER veto, and the planner's
+
+sg_consts = dict(HALF_WIDTH_M=0.5, CORRIDOR_MIN_RANGE_M=0.35,
+                 FORWARD_FOV_HALF_DEG=50.0, FORWARD_CHECK_EXTRA_M=0.6,
+                 GEOMETRY_MARGIN_M=0.9, ACCUMULATION_WINDOW_S=1.0,
+                 PIPELINE_BUDGET_S=0.2, MIN_BRAKE_DECEL_MPS2=0.5,
+                 MIN_YAW_DECEL_RPS2=0.5)
+
+
+def gate_would_block(points, speed):
+    """safety_gate's OBSTACLE test, written out from its own constants."""
+    pts = np.asarray(points, dtype=float).reshape(-1, 2)
+    envelope = ms.stopping_envelope(
+        measured_speed_mps=speed, requested_speed_mps=speed,
+        measured_yaw_rate_rps=0.0, requested_yaw_rate_rps=0.0,
+        cloud_age_s=0.0,
+        accumulation_s=sg_consts["ACCUMULATION_WINDOW_S"],
+        pipeline_s=sg_consts["PIPELINE_BUDGET_S"],
+        min_linear_decel_mps2=sg_consts["MIN_BRAKE_DECEL_MPS2"],
+        min_angular_decel_rps2=sg_consts["MIN_YAW_DECEL_RPS2"],
+        geometry_margin_m=sg_consts["GEOMETRY_MARGIN_M"])
+    azimuth = np.abs(np.degrees(np.arctan2(pts[:, 1], pts[:, 0])))
+    zone = pts[(pts[:, 0] > sg_consts["CORRIDOR_MIN_RANGE_M"]) &
+               (pts[:, 0] < envelope.distance_m + sg_consts["FORWARD_CHECK_EXTRA_M"]) &
+               (azimuth < sg_consts["FORWARD_FOV_HALF_DEG"]) &
+               (np.abs(pts[:, 1]) < sg_consts["HALF_WIDTH_M"])]
+    if len(zone) < 5:
+        return False
+    return float(np.percentile(zone[:, 0], 5)) < envelope.distance_m
+
+
+@pytest.mark.parametrize("forward", [0.6, 0.9, 1.2, 1.5, 1.8, 2.2, 2.6, 3.2])
+@pytest.mark.parametrize("lateral", [0.0, 0.2, -0.35])
+def test_the_speed_the_planner_picks_is_one_the_gate_accepts(forward, lateral):
+    """The 2026-08-30 finding, as the property that prevents it.
+
+    safety_gate refuses on two independent tests. The planner has cleared the
+    swept rectangle since 2026-08-28; it did not model the straight forward
+    corridor, whose length grows with the speed being ASKED for. So it asked
+    for 0.80 m/s at an obstacle it could have passed at 0.45 and was vetoed -
+    OBSTACLE on 5.0 % of that drive's gate samples against the sweep's 1.0 %,
+    including one unbroken 21.5 s block with no wheel turn.
+
+    Whatever speed the cap returns, the gate must accept it. A cap of zero
+    means no sampled speed clears the corridor, and nothing is claimed.
+    """
+    points = [(forward, lateral)] * 8
+    cap = core.gate_corridor_speed_cap(points)
+    if cap > 0.0:
+        assert not gate_would_block(points, cap), (
+            "planner would ask %.2f m/s at %.1f m; the gate refuses it"
+            % (cap, forward))
+
+
+def test_the_cap_is_the_fastest_the_gate_allows_not_merely_a_safe_one():
+    """A cap that always returned the crawl would pass the test above and be
+    useless. It has to be the fastest sampled speed the gate accepts."""
+    for forward in (1.5, 1.8, 2.2, 2.6, 3.2):
+        points = [(forward, 0.0)] * 8
+        cap = core.gate_corridor_speed_cap(points)
+        faster = [s for s in (0.8, 0.6, 0.45, 0.35, 0.2, 0.1) if s > cap]
+        for speed in faster:
+            assert gate_would_block(points, speed), (
+                "%.2f m/s at %.1f m is allowed but the cap said %.2f"
+                % (speed, forward, cap))
+
+
+def test_an_empty_corridor_does_not_slow_the_chair():
+    assert core.gate_corridor_speed_cap([]) == 0.8
+    assert core.gate_corridor_speed_cap([(2.0, 1.2)] * 8) == 0.8
+    assert core.gate_corridor_speed_cap([(0.2, 0.0)] * 8) == 0.8

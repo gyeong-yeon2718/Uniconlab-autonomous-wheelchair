@@ -53,7 +53,8 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import motion_safety as motion_safety_geometry  # noqa: E402
-from motion_safety import footprint_clearance  # noqa: E402
+from motion_safety import (footprint_clearance,  # noqa: E402
+                           stopping_envelope)
 
 # The follower's constants. Kept literal rather than imported because
 # waypoint_follower pulls in rospy and this has to stay testable at a desk.
@@ -117,6 +118,39 @@ SIM_MIN_PREVIEW_S = 2.0
 # Neither side was wrong on its own terms; they were looking at different
 # distances.
 OBSTACLE_PREVIEW_M = 3.0
+
+# The raw gate's OTHER veto, which this planner did not model.
+#
+# safety_gate refuses on two independent tests and only one of them is a
+# swept footprint. The other is a STRAIGHT forward corridor - half width
+# HALF_WIDTH_M, out to the stopping envelope for the speed being asked for -
+# and it does not curve with the candidate. So a planner that clears the
+# swept rectangle can still be vetoed for driving fast at something the arc
+# would have missed, and the faster it asks to go the longer that corridor
+# becomes.
+#
+# Measured on the 2026-08-30 16:14 drive: OBSTACLE fired on 5.0 % of gate
+# samples against OBSTACLE_SWEEP's 1.0 %, including one unbroken 21.5 s block
+# where the follower asked for 0.80 m/s and never got a wheel turn. The
+# obstacle was passable; the request was not.
+#
+# The envelope grows with requested speed, so this is a speed constraint
+# rather than a refusal: a candidate whose corridor is fouled at 0.80 m/s is
+# usually clear at 0.35. Rejecting those candidates lets the search find the
+# slower one by itself instead of proposing a speed the gate will veto and
+# stopping dead.
+GATE_CORRIDOR_HALF_WIDTH_M = 0.5
+GATE_CORRIDOR_MIN_RANGE_M = 0.35
+GATE_CORRIDOR_FOV_HALF_DEG = 50.0
+GATE_CORRIDOR_EXTRA_M = 0.6
+GATE_CORRIDOR_MIN_POINTS = 5
+# safety_gate's own envelope inputs, so the two compute the same distance.
+GATE_ACCUMULATION_S = 1.0
+GATE_PIPELINE_S = 0.2
+GATE_MIN_BRAKE_DECEL = 0.5
+GATE_MIN_YAW_DECEL = 0.5
+GATE_GEOMETRY_MARGIN_M = 0.9
+
 
 SPEED_SAMPLES = 5
 # How far ahead the reachable-speed window is drawn. A textbook DWA takes it
@@ -281,6 +315,48 @@ OBSTACLE_FLOOR_M = round(
     LEGACY_OBSTACLE_DISC_M
     - (motion_safety_geometry.FOOTPRINT_HALF_WIDTH_M
        + motion_safety_geometry.SWEEP_MARGIN_M), 6)
+
+
+def gate_corridor_speed_cap(points_body_xy, cloud_age_s=0.0,
+                            speeds=(0.8, 0.6, 0.45, 0.35, 0.2, 0.1)):
+    """Fastest of `speeds` whose straight corridor safety_gate would pass.
+
+    Reproduces the gate's OBSTACLE test rather than approximating it: same
+    corridor, same 5-point floor, same 5th-percentile range, same envelope.
+    ``points_body_xy`` are the obstacle returns in the chair's body frame,
+    which is the frame the gate works in.
+
+    Returns 0.0 when even the slowest speed is refused - the corridor is
+    fouled inside the geometry margin and no speed helps.
+    """
+    points = np.asarray(points_body_xy, dtype=float).reshape(-1, 2)
+    if not len(points):
+        return float(max(speeds))
+    azimuth = np.abs(np.degrees(np.arctan2(points[:, 1], points[:, 0])))
+    band = points[
+        (points[:, 0] > GATE_CORRIDOR_MIN_RANGE_M) &
+        (azimuth < GATE_CORRIDOR_FOV_HALF_DEG) &
+        (np.abs(points[:, 1]) < GATE_CORRIDOR_HALF_WIDTH_M)]
+    if len(band) < GATE_CORRIDOR_MIN_POINTS:
+        return float(max(speeds))
+    for speed in sorted(speeds, reverse=True):
+        envelope = stopping_envelope(
+            measured_speed_mps=speed,
+            requested_speed_mps=speed,
+            measured_yaw_rate_rps=0.0,
+            requested_yaw_rate_rps=0.0,
+            cloud_age_s=float(cloud_age_s),
+            accumulation_s=GATE_ACCUMULATION_S,
+            pipeline_s=GATE_PIPELINE_S,
+            min_linear_decel_mps2=GATE_MIN_BRAKE_DECEL,
+            min_angular_decel_rps2=GATE_MIN_YAW_DECEL,
+            geometry_margin_m=GATE_GEOMETRY_MARGIN_M)
+        zone = band[band[:, 0] < envelope.distance_m + GATE_CORRIDOR_EXTRA_M]
+        if len(zone) < GATE_CORRIDOR_MIN_POINTS:
+            return float(speed)
+        if float(np.percentile(zone[:, 0], 5)) >= envelope.distance_m:
+            return float(speed)
+    return 0.0
 
 
 def speed_samples(max_speed=MAX_SPEED, floor=TURN_FLOOR_SPEED,

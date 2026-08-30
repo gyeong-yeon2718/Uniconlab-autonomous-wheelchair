@@ -114,13 +114,13 @@ def test_activation_passes_the_reliability_tunables_to_the_follower():
         in activate
     assert "PERSON_BYPASS_LATERAL_HYSTERESIS_M" in activate
     assert "_person_bypass_lateral_hysteresis_m:" in activate
-    assert 'PERSON_BYPASS_CLEARANCE_M="${PERSON_BYPASS_CLEARANCE_M:-0.35}"' \
+    assert 'PERSON_BYPASS_CLEARANCE_M="${PERSON_BYPASS_CLEARANCE_M:-0.60}"' \
         in activate
     follower = text(SCRIPTS / "person_bypass_dwa_follower.py")
-    assert '"~person_bypass_clearance_m", 0.35' in follower
-    assert "PERSON_BYPASS_CLEARANCE_M=0.35" in hybrid
+    assert '"~person_bypass_clearance_m", 0.60' in follower
+    assert "PERSON_BYPASS_CLEARANCE_M=0.60" in hybrid
     guard = text(SCRIPTS / "cluster_guard.py")
-    assert "PERSON_BYPASS_CLEARANCE_M = 0.35" in guard
+    assert "PERSON_BYPASS_CLEARANCE_M = 0.60" in guard
 
 
 def test_success_profile_defaults_to_recorded_geometric_only_runtime():
