@@ -4,7 +4,9 @@ import sys
 SCRIPTS = Path(__file__).parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+import person_bypass_policy as policy  # noqa: E402
 from person_bypass_policy import (  # noqa: E402
+    PersonObservation,
     StaticPersonQualifier,
     evaluate_gate_override,
     permit_from_payload,
@@ -214,3 +216,78 @@ def test_raw_gate_override_requires_curved_clear_path_and_stopped_carried_path()
         **dict(common, carried_path_collision=True)).allowed
     assert not evaluate_gate_override(
         **dict(common, now_s=permit.expires_s + .01)).allowed
+
+
+def _walker(track_id, near_m, stamp_s=0.0, motion="static"):
+    """A person whose NEAR face sits at near_m from the chair."""
+    return PersonObservation(
+        track_id=track_id, stamp_s=stamp_s, x_m=near_m + 0.30, y_m=0.0,
+        size_x_m=0.60, size_y_m=0.60, motion=motion, source="geometric")
+
+
+def _qualify(qualifier, track_id, near_m, start=100.0):
+    """Run one track until it earns a permit; return the last permit."""
+    permit = None
+    for step in range(40):
+        stamp = start + step * 0.2
+        permit = qualifier.update(
+            (_walker(track_id, near_m, stamp),), stamp, True)
+    return permit
+
+
+def test_a_committed_pass_is_not_revoked_by_closing_on_it():
+    """The 2026-08-30 18:17 stall, as the rule that prevents it.
+
+    minimum_near_distance_m refused and called reset() the moment the chair
+    came within 0.60 m of the person's near face, wiping the evidence. The
+    chair cannot reverse, so it could never get back outside that radius and
+    the permit could never be re-earned. Over one 38-second window:
+    PERSON_TOO_CLOSE on 89.9 % of permits, semantic PERSON on 92.8 %,
+    bypass_active False throughout, and the chair moved three waypoints in
+    thirty-eight seconds while the follower reported BYPASS.
+
+    Closing on something is what passing it looks like. Approached the way a
+    chair actually approaches - in steps the position-jump guard accepts,
+    since a metre-wide jump means the tracker may have swapped bodies and
+    resetting there is correct.
+    """
+    qualifier = policy.StaticPersonQualifier(confirmation_s=3.0)
+    permit = _qualify(qualifier, 7, near_m=1.20)
+    assert permit.active and permit.reason == "STATIC_PERSON_BYPASS"
+
+    stamp = 107.8
+    for near in (1.05, 0.90, 0.75, 0.60, 0.45, 0.30):
+        stamp += 0.2
+        permit = qualifier.update((_walker(7, near, stamp),), stamp, True)
+        assert permit.active, (
+            "the permit was revoked at %.2f m, mid-pass" % near)
+        assert permit.reason == "STATIC_PERSON_BYPASS"
+
+
+def test_someone_new_and_close_still_stops_the_chair():
+    """The radius keeps its job for a body the chair has not committed to."""
+    qualifier = policy.StaticPersonQualifier(confirmation_s=3.0)
+    close = _walker(11, 0.30, 100.0)
+    permit = qualifier.update((close,), 100.0, True)
+    assert not permit.active
+    assert permit.reason == "PERSON_TOO_CLOSE"
+
+
+def test_a_different_track_stepping_in_close_is_not_covered():
+    """The latch is per track. Someone else arriving at the bumper while a
+    pass is committed is a new body and gets the radius."""
+    qualifier = policy.StaticPersonQualifier(confirmation_s=3.0)
+    assert _qualify(qualifier, 7, near_m=1.20).active
+    stranger = _walker(99, 0.30, 108.0)
+    permit = qualifier.update((stranger,), 108.2, True)
+    assert not permit.active
+    assert permit.reason == "PERSON_TOO_CLOSE"
+
+
+def test_the_commitment_does_not_survive_the_person_moving():
+    qualifier = policy.StaticPersonQualifier(confirmation_s=3.0)
+    assert _qualify(qualifier, 7, near_m=1.20).active
+    moving = _walker(7, 1.05, 108.0, motion="moving")
+    permit = qualifier.update((moving,), 108.2, True)
+    assert not permit.active
+    assert permit.reason == "PERSON_NOT_CONFIRMED_STATIC"

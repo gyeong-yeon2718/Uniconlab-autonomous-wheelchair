@@ -211,6 +211,7 @@ class StaticPersonQualifier:
 
     def reset(self) -> None:
         self.track_id = None
+        self.committed_track_id = None
         self.first_stamp_s = None
         self.last_stamp_s = None
         self.last_xy = None
@@ -244,8 +245,32 @@ class StaticPersonQualifier:
             self.reset()
             return self.inactive(now_s, "PERSON_NOT_CONFIRMED_STATIC")
         if person.near_distance_m < self.minimum_near_distance_m:
-            self.reset()
-            return self.inactive(now_s, "PERSON_TOO_CLOSE")
+            # Too close to AUTHORIZE a pass - but not to continue one.
+            #
+            # This refused and called reset(), wiping the accumulated static
+            # evidence, the moment the chair came within 0.60 m of the
+            # person's near face. The chair cannot reverse, so it could never
+            # get back outside that radius, and the permit could never be
+            # re-earned: the semantic supervisor went on zeroing every
+            # command while the follower reported BYPASS and steered into
+            # nothing.
+            #
+            # Measured on the 2026-08-30 18:17 drive: PERSON_TOO_CLOSE on
+            # 89.9 % of permits over a 38-second window, semantic PERSON on
+            # 92.8 %, threat person/static at 1.09 m and bypass_active False
+            # throughout. The follower published a non-zero command on 98.5 %
+            # of cycles and 5.8 % of them reached /cmd_vel_raw. The chair
+            # moved three waypoints in thirty-eight seconds.
+            #
+            # So the radius keeps its job for a body the chair has NOT
+            # already committed to passing - someone stepping in front stops
+            # it, as it must. For the one track that earned a permit and has
+            # stayed the same track and STATIC, coming closer is what passing
+            # something looks like, and revoking there strands the chair
+            # mid-manoeuvre in the worst place it could stop.
+            if self.committed_track_id != person.track_id:
+                self.reset()
+                return self.inactive(now_s, "PERSON_TOO_CLOSE")
         lateral_limit_m = self.maximum_lateral_m + (
             self.lateral_hysteresis_m if same_track else 0.0)
         if person.near_distance_m > self.maximum_forward_m or \
@@ -291,6 +316,7 @@ class StaticPersonQualifier:
                 min_clearance_m=self.min_clearance_m,
                 reason="QUALIFYING_STATIC_PERSON",
             )
+        self.committed_track_id = person.track_id
         return BypassPermit(
             capable=True, active=True, stamp_s=now_s,
             expires_s=now_s + self.permit_lifetime_s,
