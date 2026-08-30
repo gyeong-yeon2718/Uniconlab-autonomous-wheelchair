@@ -81,6 +81,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import String
 
 import dwa_core
+import motion_safety
 import mpc_speed
 from cluster_guard import (APPROACH, GO_ROUND,
                            PERSON_BYPASS_CLEARANCE_M,
@@ -163,6 +164,35 @@ GATE_STALL_S = 1.5
 # are their own faults with their own handling, and folding them in here
 # would relabel a dead sensor as an object in the road.
 GATE_OBSTACLE_REASONS = ("OBSTACLE", "OBSTACLE_SWEEP")
+
+
+def bypass_obstacle_floor_m():
+    """PERSON_BYPASS_CLEARANCE_M, in the units this planner now measures in.
+
+    The two branches that met here state the same berth differently.
+    cluster_guard names it from the chair CENTRE - 0.35 m, being 0.30 m of
+    half width plus a lateral reserve - which is what the planner wanted
+    while its obstacle test was a disc about that centre. Since 2026-08-28
+    the test is the padded rectangle safety_gate vetoes, and the floor is
+    room OUTSIDE it, so the rectangle already accounts for 0.45 m of any
+    centre-referenced figure.
+
+    Passing 0.35 through unconverted would ask for 0.45 + 0.35 = 0.80 m from
+    the centre. That is the value the field found too wide: it is what the
+    2026-08-28 16:11 run carried when the raw gate refused OBSTACLE_SWEEP on
+    60 % of samples at waypoints 38-48 and the chair held one waypoint for
+    nine minutes.
+
+    Clamped at zero, so this returns 0.0 and the berth is the rectangle
+    itself: 0.45 m from the centre, against the 0.35 m cluster_guard asks
+    for. Still 0.10 m more conservative than the branch that drove, and the
+    difference is deliberate - the planner may not propose an arc the gate
+    would veto. If the field wants the last 0.10 m, it comes off
+    SWEEP_MARGIN_M for both of them at once, not off one side of the pair.
+    """
+    return max(0.0, PERSON_BYPASS_CLEARANCE_M
+               - (motion_safety.FOOTPRINT_HALF_WIDTH_M
+                  + motion_safety.SWEEP_MARGIN_M))
 
 
 def gate_stall(reason, blocked_for_s, stall_s=GATE_STALL_S):
@@ -442,7 +472,7 @@ class DwaFollower(WaypointFollower):
             # reading it per cycle would widen and narrow the berth around
             # someone standing still.
             obstacle_floor_m=(
-                PERSON_BYPASS_CLEARANCE_M
+                bypass_obstacle_floor_m()
                 if (decision in (GO_ROUND, APPROACH)
                     and self.bypass_berth_is_person())
                 else dwa_core.OBSTACLE_FLOOR_M))

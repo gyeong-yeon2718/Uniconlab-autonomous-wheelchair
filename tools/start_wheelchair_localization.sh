@@ -466,11 +466,17 @@ while [ "$(date +%s)" -lt "$AUTO_INIT_DEADLINE" ]; do
     rosparam get /fast_lio_icp/auto_initialization_source 2>/dev/null ||
       echo none
   )
+  AUTO_INITIALIZATION_SOURCE_ALLOWED=false
+  if [ "$AUTO_INITIALIZATION_SOURCE" = "global_search" ] ||
+     { [ "$AUTO_INIT_GLOBAL_ONLY" = "false" ] &&
+       [ "$AUTO_INITIALIZATION_SOURCE" = "known_start_route" ]; }; then
+    AUTO_INITIALIZATION_SOURCE_ALLOWED=true
+  fi
   echo "  state: $STATE"
   if echo "$STATE" | grep -q TRACKING &&
      [ "$AUTO_INITIALIZATION_VERIFIED" = "true" ] &&
      [ "$AUTO_INITIALIZATION_STABLE" = "true" ] &&
-     [ "$AUTO_INITIALIZATION_SOURCE" = "global_search" ]; then
+     [ "$AUTO_INITIALIZATION_SOURCE_ALLOWED" = "true" ]; then
     LOCALIZED=1
     break
   fi

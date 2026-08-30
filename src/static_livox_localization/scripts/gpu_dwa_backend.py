@@ -14,6 +14,7 @@ hold instead of silently returning to the high-load CPU obstacle query.
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -208,28 +209,25 @@ def make_gpu_planner(base_class, core_module):
 
         def plan(self, state, obstacles=(), speed_cap=None,
                  last_yaw_rate=0.0, last_speed=None,
-                 obstacle_floor_m=None):
-            """Same contract as the CPU planner, including the floor.
-
-            This body is a copy of DwaPlanner.plan with the obstacle and route
-            queries offloaded, and a copy drifts. It did: dwa_follower has
-            passed obstacle_floor_m since 2026-08-27 and this signature never
-            grew it, so every cycle on the RTX backend - the field default -
-            raised TypeError before reaching the wheels. The person-bypass
-            berth it carries was equally unreachable.
-            """
-            if obstacle_floor_m is None:
-                obstacle_floor_m = core_module.OBSTACLE_FLOOR_M
+                 obstacle_floor_m=core_module.OBSTACLE_FLOOR_M,
+                 rejected_yaw_rates=None):
             cap = self.max_speed if speed_cap is None else min(
                 self.max_speed, float(speed_cap))
+            rejected = tuple(
+                float(value) for value in (
+                    getattr(self, "rejected_yaw_rates", ())
+                    if rejected_yaw_rates is None else rejected_yaw_rates)
+                if math.isfinite(float(value)))
             pairs = [
                 (v, w)
                 for v in core_module.speed_samples(cap, current=last_speed)
                 if v > 0.0
                 for w in core_module.yaw_samples()
+                if not any(abs(w - value) < 1e-6 for value in rejected)
             ]
             if not pairs:
-                return 0.0, 0.0, "SPEED_BELOW_FLOOR"
+                return 0.0, 0.0, (
+                    "GATE_REJECTED" if rejected else "SPEED_BELOW_FLOOR")
 
             span = self.preview_distance(last_speed)
             paths = self._rollouts(np.asarray(state, dtype=float), pairs, span)

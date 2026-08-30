@@ -42,19 +42,31 @@ def test_dwa_keeps_rtx_qualifies_while_paused_and_publishes_short_permit():
     assert '"/person_bypass/permit"' in follower
     assert "StaticPersonQualifier" in follower
     assert "self.tracking_state == \"TRACKING\"" in follower
-    # One decision, not two. This node used to answer the driving question
-    # itself - return GO_ROUND, and reassign dwa_core.OBSTACLE_FLOOR_M, a
-    # module global, from inside a control cycle - while the base follower
-    # answered the same question with its own clock. It now only decides
-    # whether the GATES may be asked, and defers the rest.
-    assert "self.planner.max_speed = min(" not in follower
-    assert "dwa_core.OBSTACLE_FLOOR_M =" not in follower
-    assert "return GO_ROUND" not in follower
-    assert "ordinary != GO_ROUND" in follower
+    # This node narrows the planner for the duration of a permit by
+    # reassigning module state - planner.max_speed, dwa_core.OBSTACLE_FLOOR_M
+    # and planner.rejected_yaw_rates. I had removed that in favour of one
+    # decision in the base follower; 11acd88 is the tree that actually drove
+    # and it keeps this shape, so it is kept and guarded instead.
+    #
+    # What has to hold is that every global it touches is saved before
+    # step() and restored in a finally. A narrowed clearance that leaks past
+    # the permit is a chair that keeps a person-sized berth from every wall
+    # for the rest of the run.
+    assert "return GO_ROUND" in follower
+    for name in ("self.planner.max_speed",
+                 "dwa_core.OBSTACLE_FLOOR_M",
+                 "self.planner.rejected_yaw_rates"):
+        assert name in follower, name
+    saved = follower.index("saved_max_speed = float(self.planner.max_speed)")
+    step = follower.index("super(PersonBypassDwaFollower, self).step()")
+    restore = follower.index("finally:")
+    assert saved < step < restore, "the restore must be after the base step"
+    for name in ("saved_max_speed", "saved_clearance", "saved_rejected_yaws"):
+        assert follower.count(name) >= 2, "%s is saved but never restored" % name
     # Permit qualification happens before the inherited hold ladder can
     # return for PAUSED, otherwise a person already in front makes `go`
     # impossible forever.
-    assert follower.index("self.publish_permit(self.observed_person_permit(now))") \
+    assert follower.index("if not self.enabled:") \
         < follower.index("super(PersonBypassDwaFollower, self).step()")
 
 
@@ -72,13 +84,13 @@ def test_semantic_exception_is_same_track_static_only():
 
 def test_raw_gate_replaces_only_fixed_corridor_obstacle_with_clear_curve():
     gate = text(SCRIPTS / "trajectory_safety_gate.py")
-    assert 'if reason != "OBSTACLE"' in gate
+    assert 'if reason not in ("OBSTACLE", "OBSTACLE_SWEEP")' in gate
     assert "evaluate_gate_override" in gate
     assert "requested_path_collision" in gate
     assert "carried_path_collision" in gate
     assert "immediate_collision" in gate
     assert 'return "", decision.speed_cap_mps' in gate
-    assert 'reason != "OBSTACLE_SWEEP"' not in gate
+    assert 'if reason != "OBSTACLE"' not in gate
     # SWEEP_MARGIN_M is already the protected current footprint. The branch
     # must not silently re-create the old ~0.75 m straight box with an extra
     # 0.10 m margin or a lower three-point threshold.
@@ -92,3 +104,40 @@ def test_branch_preflight_proves_new_implementations_not_only_node_names():
     assert "person_bypass_capable" in preflight
     assert "trajectory_person_bypass_capable" in preflight
     assert "permit_is_fresh" in preflight
+
+
+def test_activation_passes_the_reliability_tunables_to_the_follower():
+    activate = text(ROOT / "tools" / "activate_person_bypass.sh")
+    hybrid = text(ROOT / "tools" / "hybrid.sh")
+
+    assert 'PERSON_BYPASS_MAX_GAP_S="${PERSON_BYPASS_MAX_GAP_S:-0.45}"' \
+        in activate
+    assert "PERSON_BYPASS_LATERAL_HYSTERESIS_M" in activate
+    assert "_person_bypass_lateral_hysteresis_m:" in activate
+    assert 'PERSON_BYPASS_CLEARANCE_M="${PERSON_BYPASS_CLEARANCE_M:-0.35}"' \
+        in activate
+    follower = text(SCRIPTS / "person_bypass_dwa_follower.py")
+    assert '"~person_bypass_clearance_m", 0.35' in follower
+    assert "PERSON_BYPASS_CLEARANCE_M=0.35" in hybrid
+    guard = text(SCRIPTS / "cluster_guard.py")
+    assert "PERSON_BYPASS_CLEARANCE_M = 0.35" in guard
+
+
+def test_success_profile_defaults_to_recorded_geometric_only_runtime():
+    hybrid = text(ROOT / "tools" / "hybrid.sh")
+
+    assert 'START_POINTPILLARS="${START_POINTPILLARS:-false}"' in hybrid
+    assert 'REQUIRE_LEARNED="${REQUIRE_LEARNED:-false}"' in hybrid
+
+
+def test_static_threat_test_entrypoint_is_non_driving_by_default():
+    runner = text(ROOT / "tools" / "test_static_threat_bypass.sh")
+
+    assert 'MODE="${1:-host}"' in runner
+    assert "test_person_bypass_policy.py" in runner
+    assert "test_dwa_policy.py" in runner
+    assert "test_gpu_dwa_backend.py" in runner
+    assert "test_python_node_packaging.py" in runner
+    assert "person-bypass-status" in runner
+    assert "hybrid.sh start" not in runner
+    assert "hybrid.sh go" not in runner

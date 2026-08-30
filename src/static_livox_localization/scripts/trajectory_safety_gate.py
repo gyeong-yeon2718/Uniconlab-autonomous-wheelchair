@@ -10,11 +10,13 @@ qualified static-person permit may replace that one verdict only when:
 * the motion the chair is still carrying is collision-free (or stopped), and
 * the requested curved swept footprint is clear against all raw points.
 
-Stale sensors, invalid input, reverse, unknown/moving people, straight motion,
-and ``OBSTACLE_SWEEP`` are never overridden. The old roughly 0.75 m expanded
-straight box is deliberately not recreated here: the current footprint and
-the requested curve are measured separately, so a clear curve can actually
-recover from the fixed-corridor deadlock this node exists to remove.
+Stale sensors, invalid input, reverse, unknown/moving people, and straight
+motion are never overridden. ``OBSTACLE_SWEEP`` enters the same independent
+trajectory check so a colliding yaw is reported back to DWA for retry; it is
+not waived. The old roughly 0.75 m expanded straight box is deliberately not
+recreated here: the current footprint and the requested curve are measured
+separately, so a clear curve can recover from the fixed-corridor deadlock this
+node exists to remove.
 """
 
 import json
@@ -34,6 +36,37 @@ from person_bypass_policy import (  # noqa: E402
     permit_from_payload,
     permit_is_fresh,
 )
+
+
+BYPASS_SIDE_MARGIN_M = 0.05
+
+
+def current_footprint_points(obstacles, extra_front_m, extra_side_m):
+    front = (base_gate.FOOTPRINT_FRONT_M + base_gate.SWEEP_MARGIN_M
+             + float(extra_front_m))
+    side = (base_gate.FOOTPRINT_HALF_WIDTH_M + BYPASS_SIDE_MARGIN_M
+            + float(extra_side_m))
+    return obstacles[
+        (obstacles[:, 0] >= -base_gate.FOOTPRINT_REAR_M
+         - base_gate.SWEEP_MARGIN_M) &
+        (obstacles[:, 0] <= front) &
+        (np.abs(obstacles[:, 1]) <= side)
+    ] if len(obstacles) else obstacles
+
+
+def bypass_swept_footprint_collision(
+        obstacles, linear_speed_mps, angular_speed_rps, horizon_s):
+    longitudinal_padding = (
+        base_gate.SWEEP_MARGIN_M - BYPASS_SIDE_MARGIN_M)
+    return base_gate.swept_footprint_collision(
+        obstacles,
+        linear_speed_mps=linear_speed_mps,
+        angular_speed_rps=angular_speed_rps,
+        horizon_s=horizon_s,
+        front_m=base_gate.FOOTPRINT_FRONT_M + longitudinal_padding,
+        rear_m=base_gate.FOOTPRINT_REAR_M + longitudinal_padding,
+        half_width_m=base_gate.FOOTPRINT_HALF_WIDTH_M,
+        margin_m=BYPASS_SIDE_MARGIN_M)
 
 
 class TrajectorySafetyGate(base_gate.SafetyGate):
@@ -100,8 +133,7 @@ class TrajectorySafetyGate(base_gate.SafetyGate):
     def motion_blocked(self, now):
         reason, cap = super(TrajectorySafetyGate, self).motion_blocked(now)
         self.last_override = None
-        # This is deliberately the only replaceable verdict.
-        if reason != "OBSTACLE":
+        if reason not in ("OBSTACLE", "OBSTACLE_SWEEP"):
             return reason, cap
 
         now_s = now.to_sec()
@@ -124,44 +156,28 @@ class TrajectorySafetyGate(base_gate.SafetyGate):
             self.evidence["trajectory_override_reason"] = "HORIZON_MISSING"
             return reason, cap
 
-        # Current pose only, using the same protected dimensions as the raw
-        # swept-footprint check. The requested sweep below also samples t=0;
-        # this explicit count is retained only for a named diagnostic and a
-        # separate fail-closed reason, not as a larger straight corridor.
-        front = (base_gate.FOOTPRINT_FRONT_M + base_gate.SWEEP_MARGIN_M
-                 + self.immediate_front_margin_m)
-        side = (base_gate.FOOTPRINT_HALF_WIDTH_M + base_gate.SWEEP_MARGIN_M
-                + self.immediate_side_margin_m)
-        immediate = obstacles[
-            (obstacles[:, 0] >= -base_gate.FOOTPRINT_REAR_M
-             - base_gate.SWEEP_MARGIN_M) &
-            (obstacles[:, 0] <= front) &
-            (np.abs(obstacles[:, 1]) <= side)
-        ] if len(obstacles) else obstacles
+        # Keep the full longitudinal reserve, but size lateral protection to
+        # the measured sub-0.60 m chair width plus 0.05 m per side.
+        immediate = current_footprint_points(
+            obstacles,
+            extra_front_m=self.immediate_front_margin_m,
+            extra_side_m=self.immediate_side_margin_m)
         immediate_collision = len(immediate) >= self.immediate_point_count
 
-        requested_collision = base_gate.swept_footprint_collision(
+        requested_collision = bypass_swept_footprint_collision(
             obstacles,
             linear_speed_mps=requested_speed,
             angular_speed_rps=requested_yaw,
-            horizon_s=horizon_s,
-            front_m=base_gate.FOOTPRINT_FRONT_M,
-            rear_m=base_gate.FOOTPRINT_REAR_M,
-            half_width_m=base_gate.FOOTPRINT_HALF_WIDTH_M,
-            margin_m=base_gate.SWEEP_MARGIN_M)
+            horizon_s=horizon_s)
 
         carried_speed = max(0.0, float(self.motion.linear_speed_mps))
         carried_collision = False
         if carried_speed > base_gate.MOTION_EPSILON:
-            carried_collision = base_gate.swept_footprint_collision(
+            carried_collision = bypass_swept_footprint_collision(
                 obstacles,
                 linear_speed_mps=carried_speed,
                 angular_speed_rps=float(self.motion.angular_speed_rps),
-                horizon_s=horizon_s,
-                front_m=base_gate.FOOTPRINT_FRONT_M,
-                rear_m=base_gate.FOOTPRINT_REAR_M,
-                half_width_m=base_gate.FOOTPRINT_HALF_WIDTH_M,
-                margin_m=base_gate.SWEEP_MARGIN_M)
+                horizon_s=horizon_s)
 
         decision = evaluate_gate_override(
             permit=permit,
