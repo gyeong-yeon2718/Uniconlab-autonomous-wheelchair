@@ -26,6 +26,12 @@ case "$PERCEPTION_PROFILE" in
     : "${GEOMETRIC_MIN_CELL_POINTS:=2}"
     : "${GEOMETRIC_MIN_CLUSTER_POINTS:=8}"
     : "${GEOMETRIC_MAX_CLUSTERS:=40}"
+    # See hybrid_geometric_objects.py: the producer is forward-only, so the
+    # object being passed disappears from it exactly when the follower must
+    # not turn back into it. The rider exclusion box, not the ROI, is what
+    # keeps the chair out.
+    : "${GEOMETRIC_ROI_X_MIN_M:=-0.30}"
+    : "${GEOMETRIC_FORWARD_FOV_HALF_DEG:=115}"
     ;;
   hybrid_experimental)
     : "${START_POINTPILLARS:=true}"
@@ -33,6 +39,8 @@ case "$PERCEPTION_PROFILE" in
     : "${GEOMETRIC_MIN_CELL_POINTS:=1}"
     : "${GEOMETRIC_MIN_CLUSTER_POINTS:=5}"
     : "${GEOMETRIC_MAX_CLUSTERS:=80}"
+    : "${GEOMETRIC_ROI_X_MIN_M:=0.50}"
+    : "${GEOMETRIC_FORWARD_FOV_HALF_DEG:=50}"
     ;;
   *)
     echo "ERROR: PERCEPTION_PROFILE must be legacy_geometric or hybrid_experimental" >&2
@@ -41,3 +49,4 @@ case "$PERCEPTION_PROFILE" in
 esac
 export PERCEPTION_PROFILE START_POINTPILLARS GEOMETRIC_FIXED_MAP_SUBTRACTION
 export GEOMETRIC_MIN_CELL_POINTS GEOMETRIC_MIN_CLUSTER_POINTS GEOMETRIC_MAX_CLUSTERS
+export GEOMETRIC_ROI_X_MIN_M GEOMETRIC_FORWARD_FOV_HALF_DEG

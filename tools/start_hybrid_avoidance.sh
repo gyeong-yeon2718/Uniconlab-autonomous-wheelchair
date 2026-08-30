@@ -215,6 +215,8 @@ setsid nohup env $SINGLE_THREAD_ENV \
   _map_path:="$MAP" \
   _map_sha256:="$MAP_SHA256" \
   _fixed_map_subtraction:="$GEOMETRIC_FIXED_MAP_SUBTRACTION" \
+  _roi_x_min_m:="$GEOMETRIC_ROI_X_MIN_M" \
+  _forward_fov_half_deg:="$GEOMETRIC_FORWARD_FOV_HALF_DEG" \
   _min_cell_points:="$GEOMETRIC_MIN_CELL_POINTS" \
   _min_cluster_points:="$GEOMETRIC_MIN_CLUSTER_POINTS" \
   _max_clusters:="$GEOMETRIC_MAX_CLUSTERS" \

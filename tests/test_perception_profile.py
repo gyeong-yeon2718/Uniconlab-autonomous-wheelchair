@@ -151,3 +151,47 @@ def test_neither_entry_point_keeps_its_own_copy_of_the_profile():
         text = path.read_text(encoding="utf-8")
         assert "legacy_geometric)" not in text, (
             "%s re-implements the profile instead of sourcing it" % path.name)
+
+
+def test_the_producer_can_see_what_the_chair_is_passing():
+    """The 2026-08-30 17:27 stall, as the setting that prevents it.
+
+    obstacle_clusters is forward-only: ROI_X starts at 0.50 m and the FOV
+    cone is 50 degrees. Mid-bypass the producer went from one tracked person
+    to zero objects and stayed there 19 seconds with status OK, because the
+    returns had moved to x 0.05-0.40, y +0.61 - inside 0.50 m and at 57-85
+    degrees, out on both criteria. The follower, handed an empty list,
+    commanded +0.50 rad/s back toward the route and into what it was
+    passing; only the raw gate's sweep stopped it.
+
+    The rider exclusion box is what keeps the chair out of the cluster set,
+    not the ROI - x -1.00..0.55, y -0.60..+0.20 - and the returns above sit
+    outside it, so widening the ROI adds the object without adding the chair.
+    """
+    legacy = profile_block("legacy_geometric")
+    assert ': "${GEOMETRIC_ROI_X_MIN_M:=-0.30}"' in legacy
+    assert ': "${GEOMETRIC_FORWARD_FOV_HALF_DEG:=115}"' in legacy
+
+    import math
+    for forward, lateral in ((0.05, 0.62), (0.40, 0.61), (-0.11, 0.75)):
+        assert forward >= -0.30, (forward, lateral)
+        azimuth = abs(math.degrees(math.atan2(lateral, forward)))
+        assert azimuth <= 115.0, (forward, lateral, azimuth)
+        # and still outside the rider box, so it is the object not the chair
+        assert not (-1.00 < forward < 0.55 and abs(lateral - (-0.20)) < 0.40)
+
+
+def test_the_experimental_profile_keeps_the_forward_only_producer():
+    experimental = profile_block("hybrid_experimental")
+    assert ': "${GEOMETRIC_ROI_X_MIN_M:=0.50}"' in experimental
+    assert ': "${GEOMETRIC_FORWARD_FOV_HALF_DEG:=50}"' in experimental
+
+
+def test_the_side_view_reaches_the_node():
+    text = BRINGUP.read_text(encoding="utf-8")
+    assert '_roi_x_min_m:="$GEOMETRIC_ROI_X_MIN_M"' in text
+    assert '_forward_fov_half_deg:="$GEOMETRIC_FORWARD_FOV_HALF_DEG"' in text
+    node = GEOMETRIC.read_text(encoding="utf-8")
+    assert '_float_param("roi_x_min_m"' in node
+    assert '_float_param(\n        "forward_fov_half_deg"' in node or \
+        '_float_param(' in node and 'forward_fov_half_deg' in node

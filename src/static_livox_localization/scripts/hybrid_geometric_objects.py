@@ -24,6 +24,17 @@ import rospy
 import obstacle_clusters as legacy
 
 
+def _float_param(name, default):
+    value = rospy.get_param("~" + name, default)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        raise rospy.ROSInitException("~%s must be a number" % name)
+    if not (value == value) or value in (float("inf"), float("-inf")):
+        raise rospy.ROSInitException("~%s must be finite" % name)
+    return value
+
+
 def _bool_param(name, default):
     value = rospy.get_param("~" + name, default)
     if isinstance(value, bool):
@@ -102,6 +113,33 @@ def main():
         "min_cluster_points", legacy.MIN_CLUSTER_POINTS)
     legacy.MAX_CLUSTERS = _positive_int(
         "max_clusters", legacy.MAX_CLUSTERS)
+    # How far to the SIDE the producer may look.
+    #
+    # obstacle_clusters is forward-only by construction - ROI_X starts at
+    # 0.50 m and the FOV cone is 50 degrees - because rear and side returns
+    # are usually the rider and the chair frame. That is right for deciding
+    # whether to stop for something ahead, and wrong for the moment the
+    # chair is drawing level with the thing it is going round.
+    #
+    # 2026-08-30 17:27:43.86, mid-bypass: the producer went from one tracked
+    # person to ZERO objects and stayed there for 19 seconds, status OK the
+    # whole time. safety_gate still saw the returns at x 0.05-0.40, y +0.61
+    # - inside 0.50 m and at 57-85 degrees of azimuth, so out on both
+    # criteria. The follower, handed an empty list, commanded +0.50 rad/s
+    # back toward the route and into what it was passing; only the gate's
+    # sweep stopped it. That is the "goes, then stops" the operator saw.
+    #
+    # The rider exclusion box is what keeps the chair out of this, not the
+    # ROI: x -1.00..0.55 and y -0.60..+0.20 covers the occupant and frame,
+    # and the returns above sit outside it. Widening the ROI therefore adds
+    # the object beside the chair without adding the chair.
+    legacy.ROI_X = (_float_param("roi_x_min_m", legacy.ROI_X[0]),
+                    legacy.ROI_X[1])
+    legacy.FORWARD_FOV_HALF_DEG = _float_param(
+        "forward_fov_half_deg", legacy.FORWARD_FOV_HALF_DEG)
+    rospy.loginfo("hybrid geometry: ROI x>=%.2f m, FOV +/-%.0f deg",
+                  legacy.ROI_X[0], legacy.FORWARD_FOV_HALF_DEG)
+
     if legacy.MIN_CLUSTER_POINTS < legacy.MIN_CELL_POINTS:
         raise rospy.ROSInitException(
             "~min_cluster_points must be >= ~min_cell_points")
